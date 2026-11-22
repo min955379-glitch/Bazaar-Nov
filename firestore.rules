@@ -164,8 +164,10 @@ service cloud.firestore {
     }
 
     match /products/{productId} {
-      allow get: if isSignedIn() && isValidId(productId) && (resource.data.active == true || isAdmin());
-      allow list: if isSignedIn() && (resource.data.active == true || isAdmin());
+      // Catalog is public read-only: active products are readable by anyone
+      // (the storefront has no login); inactive products and all writes stay admin-only.
+      allow get: if isValidId(productId) && (resource.data.active == true || isAdmin());
+      allow list: if isValidId(productId) && (resource.data.active == true || isAdmin());
 
       allow create: if isAdmin() &&
                        isValidId(productId) &&

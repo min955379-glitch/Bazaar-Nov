@@ -347,3 +347,5 @@ img { max-width: 100%; display: block; }
   .user-chip .who { display: none; }
   .checkout-col { grid-template-columns: 1fr; }
 }
+
+.toolbar .demo-pill { align-self: flex-end; background: var(--gold, #f6c177); color: #1c1503; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
