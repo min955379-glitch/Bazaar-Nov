@@ -63,8 +63,10 @@ fun AccountScreen(
     adminProductsState: UiState<List<Product>>,
     adminOrdersState: UiState<List<Order>>,
     isBusy: Boolean,
+    adminPasscodeSet: Boolean,
     onUnlockAdmin: (String) -> Unit,
     onClearAdminAuthError: () -> Unit,
+    onCreateAdminPasscode: (String) -> Unit,
     onLockAdmin: () -> Unit,
     onChangeAdminPasscode: (String, String) -> Unit,
     onSaveProduct: (Product, () -> Unit) -> Unit,
@@ -93,6 +95,9 @@ fun AccountScreen(
 
     var passcodeInput by remember { mutableStateOf("") }
     var maskInput by remember { mutableStateOf(true) }
+    var setupPasscodeInput by remember { mutableStateOf("") }
+    var setupConfirmInput by remember { mutableStateOf("") }
+    var setupError by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier
@@ -231,7 +236,8 @@ fun AccountScreen(
                         }
                         Column {
                             Text(
-                                text = stringResource(R.string.admin_lock_title),
+                                text = if (adminPasscodeSet) stringResource(R.string.admin_lock_title)
+                                    else stringResource(R.string.admin_setup_title),
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
@@ -242,50 +248,136 @@ fun AccountScreen(
                         }
                     }
 
-                    Text(
-                        text = stringResource(R.string.admin_lock_subtitle),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (!adminPasscodeSet) {
+                        Text(
+                            text = stringResource(R.string.admin_setup_subtitle),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedTextField(
+                            value = setupPasscodeInput,
+                            onValueChange = {
+                                setupPasscodeInput = it
+                                setupError = null
+                                if (adminAuthError != null) onClearAdminAuthError()
+                            },
+                            label = { Text(stringResource(R.string.admin_create_passcode_label)) },
+                            leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                            trailingIcon = {
+                                IconButton(onClick = { maskInput = !maskInput }) {
+                                    Icon(
+                                        imageVector = if (maskInput) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                                        contentDescription = if (maskInput) "Show typed passcode" else "Hide typed passcode"
+                                    )
+                                }
+                            },
+                            visualTransformation = if (maskInput) PasswordVisualTransformation() else VisualTransformation.None,
+                            singleLine = true,
+                            isError = setupError != null || adminAuthError != null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_setup_passcode_input")
+                        )
+                        OutlinedTextField(
+                            value = setupConfirmInput,
+                            onValueChange = {
+                                setupConfirmInput = it
+                                setupError = null
+                            },
+                            label = { Text(stringResource(R.string.admin_confirm_passcode_label)) },
+                            leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                            trailingIcon = {
+                                IconButton(onClick = { maskInput = !maskInput }) {
+                                    Icon(
+                                        imageVector = if (maskInput) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                                        contentDescription = if (maskInput) "Show typed passcode" else "Hide typed passcode"
+                                    )
+                                }
+                            },
+                            visualTransformation = if (maskInput) PasswordVisualTransformation() else VisualTransformation.None,
+                            singleLine = true,
+                            isError = setupError != null || adminAuthError != null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_setup_confirm_input")
+                        )
+                        val setupErrorMessage = setupError ?: adminAuthError
+                        if (setupErrorMessage != null) {
+                            Text(
+                                text = setupErrorMessage,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                if (setupPasscodeInput.length < 6) {
+                                    setupError = "Passcode must be at least 6 characters."
+                                    return@Button
+                                }
+                                if (setupPasscodeInput != setupConfirmInput) {
+                                    setupError = "Passcodes do not match. Please re-enter."
+                                    return@Button
+                                }
+                                onCreateAdminPasscode(setupPasscodeInput)
+                                setupPasscodeInput = ""
+                                setupConfirmInput = ""
+                            },
+                            enabled = setupPasscodeInput.isNotEmpty() && setupConfirmInput.isNotEmpty(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .testTag("admin_setup_create_button"),
+                            shape = MaterialTheme.shapes.medium
+                        ) {
+                            Text(stringResource(R.string.admin_setup_action))
+                        }
+                    } else {
+                        Text(
+                            text = stringResource(R.string.admin_lock_subtitle),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
 
-                    OutlinedTextField(
-                        value = passcodeInput,
-                        onValueChange = {
-                            passcodeInput = it
-                            if (adminAuthError != null) onClearAdminAuthError()
-                        },
-                        label = { Text(stringResource(R.string.admin_passcode_label)) },
-                        leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
-                        trailingIcon = {
-                            IconButton(onClick = { maskInput = !maskInput }) {
-                                Icon(
-                                    imageVector = if (maskInput) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                                    contentDescription = if (maskInput) "Show typed passcode" else "Hide typed passcode"
-                                )
-                            }
-                        },
-                        visualTransformation = if (maskInput) PasswordVisualTransformation() else VisualTransformation.None,
-                        singleLine = true,
-                        isError = adminAuthError != null,
-                        supportingText = adminAuthError?.let { err -> { Text(err) } },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("admin_passcode_input")
-                    )
+                        OutlinedTextField(
+                            value = passcodeInput,
+                            onValueChange = {
+                                passcodeInput = it
+                                if (adminAuthError != null) onClearAdminAuthError()
+                            },
+                            label = { Text(stringResource(R.string.admin_passcode_label)) },
+                            leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                            trailingIcon = {
+                                IconButton(onClick = { maskInput = !maskInput }) {
+                                    Icon(
+                                        imageVector = if (maskInput) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                                        contentDescription = if (maskInput) "Show typed passcode" else "Hide typed passcode"
+                                    )
+                                }
+                            },
+                            visualTransformation = if (maskInput) PasswordVisualTransformation() else VisualTransformation.None,
+                            singleLine = true,
+                            isError = adminAuthError != null,
+                            supportingText = adminAuthError?.let { err -> { Text(err) } },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_passcode_input")
+                        )
 
-                    Button(
-                        onClick = {
-                            onUnlockAdmin(passcodeInput)
-                            passcodeInput = ""
-                        },
-                        enabled = passcodeInput.isNotEmpty(),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp)
-                            .testTag("admin_unlock_button"),
-                        shape = MaterialTheme.shapes.medium
-                    ) {
-                        Text(stringResource(R.string.admin_unlock_action))
+                        Button(
+                            onClick = {
+                                onUnlockAdmin(passcodeInput)
+                                passcodeInput = ""
+                            },
+                            enabled = passcodeInput.isNotEmpty(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .testTag("admin_unlock_button"),
+                            shape = MaterialTheme.shapes.medium
+                        ) {
+                            Text(stringResource(R.string.admin_unlock_action))
+                        }
                     }
                 }
             }

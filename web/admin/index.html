@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bazaar — Admin Portal</title>
+<meta name="description" content="Bazaar store admin portal: manage products, orders and inventory." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="#/">
+      <img src="assets/img_bazaar_icon.jpg" alt="Bazaar icon" />
+      Bazaar <span class="brand-tag">Admin</span>
+    </a>
+    <nav class="nav-tabs" id="nav-tabs" aria-label="Admin"></nav>
+    <div class="user-chip" id="user-chip" style="display:none"></div>
+  </div>
+</header>
+
+<main class="page" id="app"></main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
