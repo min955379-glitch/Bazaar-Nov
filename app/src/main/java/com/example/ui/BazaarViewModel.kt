@@ -136,7 +136,33 @@ class BazaarViewModel(
 
     fun encryptionMethodSummary(): String = keyStore.encryptionMethodSummary()
 
+    fun hasAdminPasscode(): Boolean = keyStore.hasPasscode()
+
+    /**
+     * First-run setup: create the encrypted admin verifier. No default
+     * passcode is ever seeded, so the first-run experience is always
+     * "set your own" — never a known one.
+     */
+    fun createAdminPasscode(newPasscode: String) {
+        val result = keyStore.storeInitialPasscode(newPasscode)
+        result.fold(
+            onSuccess = {
+                _adminUnlocked.value = true
+                _adminAuthError.value = null
+                _feedbackMessage.value = "Admin passcode created and sealed with Android Keystore."
+            },
+            onFailure = {
+                _adminAuthError.value = it.localizedMessage ?: "Failed to create admin passcode."
+            }
+        )
+    }
+
     fun unlockAdminPanel(passcode: String) {
+        if (!keyStore.hasPasscode()) {
+            _adminAuthError.value = "No admin passcode is set yet. Create one first."
+            _feedbackMessage.value = null
+            return
+        }
         if (keyStore.verifyPasscode(passcode)) {
             _adminUnlocked.value = true
             _adminAuthError.value = null

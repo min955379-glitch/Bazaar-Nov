@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bazaar — Curated Goods, Live Cloud Inventory</title>
+<meta name="description" content="Bazaar storefront: curated goods with live cloud inventory, Google sign-in, cart and instant order tracking." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="#/shop" id="brand-link">
+      <img src="assets/img_bazaar_icon.jpg" alt="Bazaar icon" />
+      Bazaar
+    </a>
+    <nav class="nav-tabs" id="nav-tabs" aria-label="Primary"></nav>
+    <div class="user-chip" id="user-chip" style="display:none"></div>
+  </div>
+</header>
+
+<main class="page" id="app"></main>
+
+<footer class="foot" id="foot" style="display:none">
+  <span>Bazaar &copy; 2026 · Curated Goods</span>
+  <div style="margin-top:6px"><a href="#" id="admin-link" title="Open the store admin portal">Store admin portal &rarr;</a></div>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -20,4 +20,10 @@
     <string name="admin_unlock_action">Unlock Admin Panel</string>
     <string name="admin_invalid_passcode">Invalid passcode. Please try again.</string>
     <string name="admin_lock_session">Lock Panel</string>
+    <string name="default_web_client_id" translatable="false">666472367175-22jq7qhoo7s2vkggiodoj3apk73efd5c.apps.googleusercontent.com</string>
+    <string name="admin_setup_title">Set Up Your Admin Passcode</string>
+    <string name="admin_setup_subtitle">No encrypted passcode exists on this device yet. Create one now — it is sealed with Android Keystore and can never be recovered.</string>
+    <string name="admin_create_passcode_label">New Admin Passcode</string>
+    <string name="admin_confirm_passcode_label">Confirm Passcode</string>
+    <string name="admin_setup_action">Create Admin Passcode</string>
 </resources>

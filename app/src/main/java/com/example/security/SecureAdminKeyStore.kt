@@ -21,6 +21,12 @@ import javax.crypto.spec.SecretKeySpec
  * Stores a salted PBKDF2-HMAC-SHA256 digest encrypted with an AES-256-GCM key
  * held inside AndroidKeyStore. The passcode is never persisted in plaintext
  * and is never exposed in the UI.
+ *
+ * Security note: no default passcode is ever seeded. A brand-new install
+ * starts with NO verifier; the admin must create one via the first-run
+ * "Set up your admin passcode" flow. Previously this class bootstrapped an
+ * obfuscated hardcoded passcode that was readable by anyone with repository
+ * access — that default has been removed.
  */
 class SecureAdminKeyStore(context: Context) {
 
@@ -30,16 +36,38 @@ class SecureAdminKeyStore(context: Context) {
     )
     private val secureRandom = SecureRandom()
 
-    init {
-        ensureInitialized()
-    }
-
     fun encryptionMethodSummary(): String =
         if (isAndroidKeyStoreAvailable()) {
             "AES-256-GCM (Android Keystore) + PBKDF2-SHA256"
         } else {
             "PBKDF2-HMAC-SHA256 Encrypted Verifier"
         }
+
+    /** True once a verifier has been stored on this device. */
+    fun hasPasscode(): Boolean =
+        !prefs.getString(KEY_CIPHER_BLOB, null).isNullOrBlank() &&
+            !prefs.getString(KEY_CIPHER_IV, null).isNullOrBlank()
+
+    /**
+     * First-run setup: store a brand-new verifier. Refuses to overwrite an
+     * existing passcode — use [updatePasscode] to change one.
+     */
+    fun storeInitialPasscode(passcode: String): Result<Unit> {
+        if (hasPasscode()) {
+            return Result.failure(
+                IllegalStateException("An admin passcode is already set. Use change-passcode to update it.")
+            )
+        }
+        if (passcode.length < 6) {
+            return Result.failure(IllegalArgumentException("Passcode must be at least 6 characters."))
+        }
+        if (passcode.length > 128) {
+            return Result.failure(IllegalArgumentException("Passcode must be 128 characters or fewer."))
+        }
+        return runCatching {
+            storeEncryptedPasscode(passcode)
+        }
+    }
 
     fun verifyPasscode(candidate: String): Boolean {
         if (candidate.isEmpty()) return false
@@ -53,32 +81,20 @@ class SecureAdminKeyStore(context: Context) {
     }
 
     fun updatePasscode(currentPasscode: String, newPasscode: String): Result<Unit> {
+        if (!hasPasscode()) {
+            return Result.failure(IllegalStateException("No admin passcode is set yet. Set one first."))
+        }
         if (!verifyPasscode(currentPasscode)) {
             return Result.failure(IllegalArgumentException("Current admin passcode is incorrect."))
         }
         if (newPasscode.length < 6) {
             return Result.failure(IllegalArgumentException("New passcode must be at least 6 characters."))
         }
+        if (newPasscode.length > 128) {
+            return Result.failure(IllegalArgumentException("New passcode must be 128 characters or fewer."))
+        }
         return runCatching {
             storeEncryptedPasscode(newPasscode)
-        }
-    }
-
-    private fun ensureInitialized() {
-        val existingCiphertext = prefs.getString(KEY_CIPHER_BLOB, null)
-        val existingIv = prefs.getString(KEY_CIPHER_IV, null)
-        if (!existingCiphertext.isNullOrBlank() && !existingIv.isNullOrBlank()) {
-            return
-        }
-        // Bootstrap initial verifier from sealed digest on first launch.
-        val initialSecret = buildInitialSecret()
-        storeEncryptedPasscode(initialSecret)
-    }
-
-    private fun buildInitialSecret(): String {
-        val codes = intArrayOf(108, 97, 114, 107, 97, 110, 97)
-        return buildString(codes.size) {
-            for (c in codes) append(c.toChar())
         }
     }
 
