@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name">Bazaar</string>
+    <string name="auth_title">Bazaar Store</string>
+    <string name="auth_subtitle">Curated goods, live cloud inventory, and instant order tracking synced to your Google account.</string>
+    <string name="sign_in_google">Sign in with Google</string>
+    <string name="sign_out">Sign Out</string>
+    <string name="nav_shop">Shop</string>
+    <string name="nav_cart">Cart</string>
+    <string name="nav_orders">Orders</string>
+    <string name="nav_account">Account</string>
+    <string name="search_products_hint">Search curated products…</string>
+    <string name="add_to_cart">Add to Cart</string>
+    <string name="out_of_stock">Out of Stock</string>
+    <string name="checkout">Proceed to Checkout</string>
+    <string name="place_order">Place Live Order</string>
+    <string name="admin_panel_title">Admin Panel</string>
+    <string name="admin_lock_title">Encrypted Admin Access</string>
+    <string name="admin_lock_subtitle">Enter your administrator passcode to unlock live catalog and order controls. Passcode verification is sealed with Android Keystore AES-256-GCM.</string>
+    <string name="admin_passcode_label">Admin Passcode</string>
+    <string name="admin_unlock_action">Unlock Admin Panel</string>
+    <string name="admin_invalid_passcode">Invalid passcode. Please try again.</string>
+    <string name="admin_lock_session">Lock Panel</string>
+</resources>

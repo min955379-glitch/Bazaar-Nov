@@ -1,0 +1,6 @@
+{
+  "name": "Bazaar",
+  "description": "Live shopping store app with Firebase Firestore cloud sync, Google Sign-In, and an encrypted key-protected Admin Panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
