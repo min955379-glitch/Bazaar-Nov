@@ -30,7 +30,7 @@ const firebaseConfig = {
   storageBucket: "gen-lang-client-0568023966.firebasestorage.app",
 };
 const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b40e";
-const ADMIN_PORTAL_URL = "https://bazaar-admin.vercel.app";
+const ADMIN_PORTAL_URL = "https://bazaar-admin-min955379-6910.vercel.app";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
