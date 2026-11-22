@@ -1,25 +1,11 @@
-/* ===== Bazaar storefront — vanilla JS + Firebase ===== */
+/* ===== Bazaar storefront — vanilla JS + Firebase (no sign-in required) ===== */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  onAuthStateChanged,
-  signOut,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore,
   collection,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
   onSnapshot,
   query,
   where,
-  serverTimestamp,
-  writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /* ---------- Config (client-side public config; security is enforced by Firestore rules) ---------- */
@@ -31,26 +17,53 @@ const firebaseConfig = {
 };
 const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b40e";
 const ADMIN_PORTAL_URL = "https://bazaar-admin-min955379-6910.vercel.app";
+const CART_KEY = "bazaar_cart_v1";
+const ORDERS_KEY = "bazaar_orders_v1";
 
 const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
 const db = getFirestore(app, DATABASE_ID);
-const googleProvider = new GoogleAuthProvider();
 
-/* ---------- State ---------- */
-let currentUser = null;
-let products = [];
-let cart = [];
-let orders = [];
+/* ---------- State (cart + orders live on this device; catalog is live from Firestore) ---------- */
+let liveProducts = [];
+let liveCatalogFailed = false;
+let cart = loadJSON(CART_KEY, []);
+let orders = loadJSON(ORDERS_KEY, []);
 let productsReady = false;
-let cartReady = false;
-let ordersReady = false;
 let loadingError = null;
 let searchQuery = "";
 let selectedCategory = null;
 let currentRoute = "shop";
 let unsubscribers = [];
-let syncPromise = null;
+
+/* Demo catalog used only when the live Firestore catalog is unavailable (e.g. rules not deployed).
+   Clearly labelled in the UI as a demo. */
+const DEMO_CATALOG = [
+  { id: "starter_anc_headphones", title: "Obsidian ANC Studio Headphones", description: "Active noise-canceling wireless over-ear headphones with 40-hour battery, plush memory foam earcups, and lossless USB-C audio.", category: "Electronics", priceCents: 18900, stockCount: 18, imageKey: "electronics", active: true, featured: true },
+  { id: "starter_cognac_tote", title: "Artisan Cognac Leather Tote", description: "Hand-stitched full-grain vegetable-tanned leather tote with brass hardware and a padded 14-inch laptop sleeve.", category: "Fashion", priceCents: 14500, stockCount: 12, imageKey: "fashion", active: true, featured: true },
+  { id: "starter_sage_carafe", title: "Matte Sage Ceramic Pour-Over Set", description: "Stoneware coffee dripper and insulated serving carafe with natural oak collar for clean, aromatic morning brews.", category: "Home", priceCents: 6400, stockCount: 24, imageKey: "home", active: true, featured: true },
+  { id: "starter_titanium_watch", title: "Minimalist Titanium Smartwatch", description: "Sapphire crystal AMOLED display, 10-day endurance battery, heart-rate & sleep telemetry, and 5ATM water resistance.", category: "Electronics", priceCents: 22900, stockCount: 9, imageKey: "electronics", active: true, featured: false },
+  { id: "starter_tortoise_shades", title: "Heritage Tortoise Sunglasses", description: "Polarized UV400 green-tint mineral lenses set in hand-finished Italian acetate and brushed gold temples.", category: "Accessories", priceCents: 8800, stockCount: 15, imageKey: "fashion", active: true, featured: false },
+  { id: "starter_brass_lamp", title: "Arc Brushed Brass Desk Lamp", description: "Sculptural curved reading lamp in warm satin brass with stepless touch dimming and flicker-free warm LED.", category: "Home", priceCents: 11900, stockCount: 7, imageKey: "home", active: true, featured: false },
+];
+
+function currentProducts() {
+  if (liveCatalogFailed) return DEMO_CATALOG;
+  return liveProducts;
+}
+
+/* ---------- Local persistence helpers ---------- */
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    const v = raw ? JSON.parse(raw) : fallback;
+    return Array.isArray(v) ? v : fallback;
+  } catch { return fallback; }
+}
+
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch (e) { console.warn("Could not persist", key, e); }
+}
 
 /* ---------- DOM helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -113,21 +126,11 @@ function imgFor(key) {
   return PRESETS[t.toLowerCase()] || PRESETS.electronics;
 }
 
-function initialsOf(name) {
-  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
-  return (parts[0]?.[0] || "B").toUpperCase();
-}
-
-function escAttr(v) {
-  return String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 /* ---------- Navigation ---------- */
 const VIEWS = [
   { id: "shop", label: "Shop" },
   { id: "cart", label: "Cart" },
   { id: "orders", label: "Orders" },
-  { id: "account", label: "Account" },
 ];
 
 function currentRouteId() {
@@ -159,8 +162,7 @@ function renderNav() {
       el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "aria-hidden": "true" },
         v.id === "shop" ? path("M3 7l9-4 9 4-9 4-9-4zM3 7v7l9 4 9-4V7M12 11v7") :
         v.id === "cart" ? path("M6 6h15l-2 10H8L6 6zM9 6a3 3 0 016 0") :
-        v.id === "orders" ? path("M6 3h12v18l-3-2-3 2-3-2-3 2V3z") :
-        path("M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0")
+        path("M6 3h12v18l-3-2-3 2-3-2-3 2V3z")
       ),
       el("span", { text: v.label }),
       badge ? el("span", { class: "cart-badge", text: String(badge) }) : null
@@ -181,198 +183,106 @@ function path(d) {
   return p;
 }
 
-function renderUserChip() {
-  const chip = $("#user-chip");
-  chip.innerHTML = "";
-  if (!currentUser) {
-    chip.style.display = "none";
-    return;
-  }
-  chip.style.display = "flex";
-  const avatar = el("div", { class: "avatar" });
-  const photo = currentUser.photoURL;
-  if (photo && /^https?:\/\//i.test(photo)) {
-    avatar.append(el("img", { src: photo, alt: "", referrerpolicy: "no-referrer" }));
-  } else {
-    avatar.textContent = initialsOf(currentUser.displayName);
-  }
-  const who = el("div", { class: "who" },
-    el("div", { class: "name", text: currentUser.displayName || "Shopper" }),
-    el("div", { class: "role", text: currentUser.email || "" })
-  );
-  const signOutBtn = el("button", { class: "icon-btn", title: "Sign out", onclick: handleSignOut },
-    el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" },
-      path("M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9")
-    )
-  );
-  chip.append(avatar, who, signOutBtn);
-}
-
-/* ---------- Firestore sync ---------- */
+/* ---------- Firestore catalog (read-only) ---------- */
 function clearListeners() {
   unsubscribers.forEach((u) => { try { u(); } catch {} });
   unsubscribers = [];
 }
 
-function syncProfile(user) {
-  if (syncPromise) return syncPromise;
-  const path = `users/${user.uid}`;
-  const ref = doc(db, "users", user.uid);
-  const safeName = (user.displayName || "").trim().slice(0, 100) || "Bazaar Shopper";
-  const safeEmail = (user.email || "").trim().slice(0, 160) || "shopper@bazaar.app";
-  const safePhoto = user.photoURL ? String(user.photoURL).slice(0, 500) : null;
-  syncPromise = (async () => {
-    try {
-      const snap = await getDoc(ref);
-      if (!snap.exists()) {
-        await setDoc(ref, {
-          userId: user.uid,
-          displayName: safeName,
-          email: safeEmail,
-          ...(safePhoto ? { photoUrl: safePhoto } : {}),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(ref, {
-          displayName: safeName,
-          email: safeEmail,
-          ...(safePhoto ? { photoUrl: safePhoto } : {}),
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } catch (e) {
-      console.warn("Profile sync failed", e);
-    }
-  })();
-  return syncPromise;
-}
-
-function startListeners(user) {
+function startListeners() {
   clearListeners();
   loadingError = null;
-  productsReady = cartReady = ordersReady = false;
-  products = [];
-  cart = [];
-  orders = [];
+  liveCatalogFailed = false;
+  liveProducts = [];
+  productsReady = false;
 
   unsubscribers.push(onSnapshot(query(collection(db, "products"), where("active", "==", true)), (snap) => {
-    products = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    liveProducts = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
       .filter((p) => p && typeof p.title === "string")
       .sort((a, b) => (b.featured === true) - (a.featured === true) || a.title.localeCompare(b.title));
     productsReady = true;
     rerender();
   }, (err) => {
     console.error(err);
-    loadingError = "Could not load the catalog. Check your connection and sign-in.";
+    loadingError = "Live catalog is unavailable. Showing the demo catalog.";
+    liveCatalogFailed = true;
     productsReady = true;
-    rerender();
-  }));
-
-  unsubscribers.push(onSnapshot(query(collection(db, "users", user.uid, "cart")), (snap) => {
-    cart = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .filter((i) => i && typeof i.title === "string")
-      .sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-    cartReady = true;
-    rerender();
-  }, (err) => {
-    console.error(err);
-    loadingError = "Could not load your cart.";
-    cartReady = true;
-    rerender();
-  }));
-
-  unsubscribers.push(onSnapshot(query(collection(db, "orders"), where("userId", "==", user.uid)), (snap) => {
-    orders = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .filter((o) => o && typeof o.status === "string")
-      .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-    ordersReady = true;
-    rerender();
-  }, (err) => {
-    console.error(err);
-    loadingError = "Could not load your orders.";
-    ordersReady = true;
     rerender();
   }));
 }
 
 /* ---------- Actions ---------- */
-async function handleAddToCart(product) {
-  if (!currentUser) return;
+function handleAddToCart(product) {
+  if (!product || product.active === false) { toast("Out of stock — this item is unavailable.", true); return; }
   if (product.stockCount <= 0) { toast("Out of stock — this item is unavailable.", true); return; }
-  const uid = currentUser.uid;
-  const cartRef = doc(db, "users", uid, "cart", product.id);
-  try {
-    const snap = await getDoc(cartRef);
-    const current = snap.exists() ? (snap.data().quantity || 0) : 0;
-    const target = Math.min(50, product.stockCount);
-    const qty = Math.min(current + 1, target);
-    const safeTitle = (product.title || "Product").slice(0, 120);
-    const safeImage = (product.imageKey || "electronics").slice(0, 500) || "electronics";
-    const safePrice = Math.max(1, Math.min(product.priceCents || 1, 100_000_000));
-    if (snap.exists()) {
-      await updateDoc(cartRef, { title: safeTitle, priceCents: safePrice, imageKey: safeImage, quantity: qty, updatedAt: serverTimestamp() });
-    } else {
-      await setDoc(cartRef, {
-        productId: product.id, title: safeTitle, priceCents: safePrice, imageKey: safeImage,
-        quantity: qty, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-      });
-    }
-    toast(`Added ${product.title} to your cart.`);
-  } catch (e) {
-    toast(e.message || "Could not add the item to your cart.", true);
+  const existing = cart.find((i) => i.productId === product.id);
+  const current = existing ? existing.quantity : 0;
+  const target = Math.min(50, product.stockCount);
+  const qty = Math.min(current + 1, target);
+  if (existing) {
+    existing.quantity = qty;
+  } else {
+    cart.push({
+      productId: product.id,
+      title: (product.title || "Product").slice(0, 120),
+      priceCents: Math.max(1, Math.min(product.priceCents || 1, 100_000_000)),
+      imageKey: (product.imageKey || "electronics").slice(0, 500),
+      quantity: qty,
+    });
   }
+  saveJSON(CART_KEY, cart);
+  toast(`Added ${product.title} to your cart.`);
+  rerender();
 }
 
-async function handleSetQty(item, qty) {
-  if (!currentUser) return;
-  const uid = currentUser.uid;
-  const ref = doc(db, "users", uid, "cart", item.productId || item.id);
-  const maxStock = products.find((p) => p.id === item.productId)?.stockCount ?? 50;
-  try {
-    if (qty <= 0) {
-      await deleteDoc(ref);
-      return;
-    }
+function handleSetQty(item, qty) {
+  const product = currentProducts().find((p) => p.id === item.productId);
+  const maxStock = product ? product.stockCount : 50;
+  const existing = cart.find((i) => i.productId === item.productId);
+  if (!existing) return;
+  if (qty <= 0) {
+    cart = cart.filter((i) => i.productId !== item.productId);
+  } else {
     const clamped = Math.max(1, Math.min(qty, Math.min(50, Math.max(1, maxStock))));
-    await updateDoc(ref, { quantity: clamped, updatedAt: serverTimestamp() });
-  } catch (e) {
-    toast(e.message || "Could not update quantity.", true);
+    existing.quantity = clamped;
   }
+  saveJSON(CART_KEY, cart);
+  rerender();
 }
 
-async function handleRemoveItem(item) {
-  if (!currentUser) return;
-  const uid = currentUser.uid;
+function handleRemoveItem(item) {
+  cart = cart.filter((i) => i.productId !== item.productId);
+  saveJSON(CART_KEY, cart);
+  rerender();
+}
+
+function handleCancelOrder(order) {
+  const idx = orders.findIndex((o) => o.id === order.id);
+  if (idx < 0) return;
+  orders = orders.map((o) => (o.id === order.id ? { ...o, status: "CANCELLED" } : o));
+  saveJSON(ORDERS_KEY, orders);
+  toast("Order cancelled.");
+  rerender();
+}
+
+function makeOrderId() {
   try {
-    await deleteDoc(doc(db, "users", uid, "cart", item.productId || item.id));
-  } catch (e) {
-    toast(e.message || "Could not remove the item.", true);
-  }
+    if (crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  } catch {}
+  return `local_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-async function handleCancelOrder(order) {
-  if (!currentUser) return;
-  try {
-    await updateDoc(doc(db, "orders", order.id), { status: "CANCELLED", updatedAt: serverTimestamp() });
-    toast("Order cancelled.");
-  } catch (e) {
-    toast(e.message || "Could not cancel the order.", true);
-  }
-}
-
-async function handleCheckout({ name, address, phone, method }) {
-  if (!currentUser) return;
+function handleCheckout({ name, email, address, phone, method }) {
   if (!cart.length) { toast("Your cart is empty.", true); return; }
   const trimmedName = name.trim();
+  const trimmedEmail = (email || "").trim();
   const trimmedAddress = address.trim();
   const trimmedPhone = phone.trim();
   if (trimmedName.length < 2 || trimmedName.length > 100) { toast("Please enter a valid recipient name (2–100 chars).", true); return; }
+  if (trimmedEmail.length > 160) { toast("Please enter a valid email (max 160 chars).", true); return; }
   if (trimmedAddress.length < 5 || trimmedAddress.length > 300) { toast("Please enter a complete shipping address (min 5 chars).", true); return; }
   if (trimmedPhone.length < 5 || trimmedPhone.length > 30) { toast("Please enter a valid contact phone number.", true); return; }
 
-  const uid = currentUser.uid;
-  const productsById = Object.fromEntries(products.map((p) => [p.id, p]));
   const lineItems = cart.map((i) => ({
     productId: i.productId,
     title: (i.title || "").slice(0, 120),
@@ -384,12 +294,10 @@ async function handleCheckout({ name, address, phone, method }) {
   if (totalCents < 1 || totalCents > 500_000_000) { toast("Order total is out of valid range.", true); return; }
   if (itemCount < 1 || itemCount > 200) { toast("Item count is out of valid range.", true); return; }
 
-  const batch = writeBatch(db);
-  const orderRef = doc(collection(db, "orders"));
-  batch.set(orderRef, {
-    userId: uid,
+  const order = {
+    id: makeOrderId(),
     customerName: trimmedName,
-    customerEmail: (currentUser.email || "shopper@bazaar.app").slice(0, 160),
+    customerEmail: trimmedEmail,
     shippingAddress: trimmedAddress,
     customerPhone: trimmedPhone,
     paymentMethod: method,
@@ -397,50 +305,16 @@ async function handleCheckout({ name, address, phone, method }) {
     totalCents,
     itemCount,
     items: lineItems,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 
-  for (const item of lineItems) {
-    const product = productsById[item.productId];
-    if (product && product.active && product.stockCount >= item.quantity) {
-      const newStock = product.stockCount - item.quantity;
-      if (newStock < product.stockCount) {
-        batch.update(doc(db, "products", product.id), { stockCount: newStock, updatedAt: serverTimestamp() });
-      }
-    }
-    batch.delete(doc(db, "users", uid, "cart", item.productId));
-  }
-
-  try {
-    await batch.commit();
-    toast(`Order #${orderRef.id.slice(0, 6).toUpperCase()} placed live!`);
-    navigate("orders");
-  } catch (e) {
-    toast(e.message || "Order submission failed.", true);
-  }
-}
-
-async function handleSignIn() {
-  try {
-    await signInWithPopup(auth, googleProvider);
-  } catch (e) {
-    if (e && (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request")) return;
-    const msg = e && e.code === "auth/unauthorized-domain"
-      ? `Google sign-in is not enabled for this domain (${location.hostname}). Add it to Firebase Authentication → Settings → Authorized domains, then try again.`
-      : (e && e.message) || "Google sign-in failed.";
-    toast(msg, true);
-    const gateErr = $("#gate-error");
-    if (gateErr) { gateErr.textContent = msg; gateErr.classList.add("show"); }
-  }
-}
-
-async function handleSignOut() {
-  try {
-    await signOut(auth);
-  } catch (e) {
-    console.warn("Sign out failed", e);
-  }
+  orders = [order, ...orders];
+  saveJSON(ORDERS_KEY, orders);
+  cart = [];
+  saveJSON(CART_KEY, cart);
+  toast(`Order #${order.id.slice(0, 6).toUpperCase()} placed!`);
+  navigate("orders");
 }
 
 /* ---------- Views ---------- */
@@ -449,23 +323,14 @@ function render() {
   const foot = $("#foot");
   const chip = $("#user-chip");
   nav.innerHTML = "";
-  chip.innerHTML = "";
-  if (!currentUser) {
-    nav.style.display = "none";
-    foot.style.display = "none";
-    chip.style.display = "none";
-    appMain.innerHTML = "";
-    appMain.append(gateView());
-    return;
-  }
   nav.style.display = "flex";
   foot.style.display = "block";
+  if (chip) chip.style.display = "none";
   $("#admin-link").href = ADMIN_PORTAL_URL;
   renderNav();
-  renderUserChip();
   appMain.innerHTML = "";
   const view = currentRoute;
-  const renderers = { shop: renderShop, cart: renderCart, orders: renderOrders, account: renderAccount };
+  const renderers = { shop: renderShop, cart: renderCart, orders: renderOrders };
   (renderers[view] || renderShop)();
 }
 
@@ -473,33 +338,10 @@ function rerender() {
   render();
 }
 
-function gateView() {
-  const signInBtn = el("button", { id: "gate-sign-in", class: "google-btn", onclick: handleSignIn },
-    el("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", width: "22", height: "22" },
-      el("circle", { cx: "12", cy: "12", r: "11", fill: "#ffffff" }),
-      el("text", { x: "12", y: "16.4", "text-anchor": "middle", "font-size": "11.5", "font-weight": "800", fill: "#1a1917", "font-family": "Arial, sans-serif" }, "G")
-    ),
-    el("span", { text: "Sign in with Google" })
-  );
-  return el("div", { class: "gate-wrap" },
-    el("div", { class: "gate-card" },
-      el("div", { class: "hero-top" },
-        el("img", { src: "assets/img_hero_banner.jpg", alt: "Bazaar editorial store collection" }),
-        el("div", { class: "scrim" }),
-        el("span", { class: "pill", text: "Live Store" })
-      ),
-      el("div", { class: "content" },
-        el("h1", { text: "Bazaar Store" }),
-        el("p", { class: "sub", text: "Curated goods, live cloud inventory, and instant order tracking — signed in with Google." }),
-        signInBtn,
-        el("p", { id: "gate-error", class: "gate-err", text: "" })
-      )
-    )
-  );
-}
-
 /* ---------- Shop ---------- */
 function renderShop() {
+  const products = currentProducts();
+  const hasDemo = liveCatalogFailed && liveProducts.length === 0;
   const main = appMain;
 
   const hero = el("div", { class: "hero" },
@@ -520,6 +362,9 @@ function renderShop() {
     el("button", { type: "button", text: "Clear", onclick: () => { searchQuery = ""; rerender(); } })
   );
   toolbar.append(search);
+  if (hasDemo) {
+    toolbar.append(el("span", { class: "demo-pill", text: "Demo catalog — live inventory unavailable" }));
+  }
   main.append(toolbar);
 
   const chips = el("div", { class: "chip-row" });
@@ -564,17 +409,10 @@ function renderShop() {
 
   const grid = el("div", { class: "product-grid" });
   if (all.length === 0) {
-    if (loadingError) {
-      grid.append(el("div", { class: "empty-state" },
-        el("h3", { text: "Catalog unavailable" }),
-        el("p", { text: loadingError })
-      ));
-    } else {
-      grid.append(el("div", { class: "empty-state" },
-        el("h3", { text: searchQuery ? "Nothing matches that search" : "No products yet" }),
-        el("p", { text: searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store administrator will appear here in real time." })
-      ));
-    }
+    grid.append(el("div", { class: "empty-state" },
+      el("h3", { text: searchQuery ? "Nothing matches that search" : "No products yet" }),
+      el("p", { text: searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store administrator will appear here in real time." })
+    ));
   } else {
     for (const p of all) grid.append(productCard(p));
   }
@@ -647,29 +485,21 @@ function addToCartSafe(p) {
 function renderCart() {
   const main = appMain;
 
-  if (!cartReady) {
-    main.append(el("div", { class: "checkout-col" },
-      el("div", { class: "skel", style: "height: 260px" }),
-      el("div", { class: "skel", style: "height: 320px" })
-    ));
-    return;
-  }
-
   if (cart.length === 0) {
     main.append(el("div", { class: "empty-state" },
       el("h3", { text: "Your cart is empty" }),
-      el("p", { text: "Browse the shop and add something to your cart — it will sync live to your account." }),
+      el("p", { text: "Browse the shop and add something to your cart — it's saved on this device." }),
       el("button", { class: "panel-btn", style: "margin-top:16px; max-width:260px", onclick: () => navigate("shop") }, el("span", { text: "Browse the shop" }))
     ));
     return;
   }
 
+  const products = currentProducts();
   const subtotal = cart.reduce((s, i) => s + (i.priceCents || 0) * (i.quantity || 0), 0);
-
   const grid = el("div", { class: "checkout-col" });
 
   const cartCard = el("div", { class: "cart-card" },
-    el("div", { class: "head" }, el("h2", { text: `Cart (${cart.length})` }), el("span", { class: "sub", style: "color:var(--muted);font-size:.8rem", text: "Live cloud sync" }))
+    el("div", { class: "head" }, el("h2", { text: `Cart (${cart.length})` }), el("span", { class: "sub", style: "color:var(--muted);font-size:.8rem", text: "Saved on this device" }))
   );
   for (const item of cart) {
     const img = imgFor(item.imageKey);
@@ -702,7 +532,8 @@ function renderCart() {
   );
   const body = checkoutCard.lastElementChild;
 
-  const name = field("Recipient name", "input", "checkout-name", "Full name", currentUser ? currentUser.displayName || "" : "");
+  const name = field("Recipient name", "input", "checkout-name", "Full name", "");
+  const email = field("Email (optional)", "input", "checkout-email", "you@example.com", "");
   const address = field("Shipping address", "textarea", "checkout-address", "Street, city, postal code", "");
   const phone = field("Phone", "input", "checkout-phone", "+92 300 0000000", "");
   const method = el("div", { class: "field" },
@@ -713,14 +544,14 @@ function renderCart() {
       el("option", { text: "Digital Wallet", value: "Digital Wallet" })
     )
   );
-  body.append(name.wrapper, address.wrapper, phone.wrapper, method);
+  body.append(name.wrapper, email.wrapper, address.wrapper, phone.wrapper, method);
 
   const btn = el("button", { class: "place-btn", type: "button", onclick: onCheckoutClick },
     el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M5 22l14-14-3.5-3.5L1.5 18.5 1 23z")),
-    `Place Live Order · ${fmtMoney(subtotal)}`
+    `Place Order · ${fmtMoney(subtotal)}`
   );
   body.append(btn);
-  body.append(el("p", { class: "note", text: "Orders are written to your live Firestore account and confirmed instantly." }));
+  body.append(el("p", { class: "note", text: "Orders are stored on this device only. No sign-in required." }));
 
   grid.append(cartCard, checkoutCard);
   main.append(grid);
@@ -737,19 +568,16 @@ function field(label, kind, id, placeholder, value) {
 
 function onCheckoutClick() {
   const name = $("#checkout-name")?.value ?? "";
+  const email = $("#checkout-email")?.value ?? "";
   const address = $("#checkout-address")?.value ?? "";
   const phone = $("#checkout-phone")?.value ?? "";
   const method = $("#checkout-method")?.value ?? "Cash on Delivery";
-  handleCheckout({ name, address, phone, method });
+  handleCheckout({ name, email, address, phone, method });
 }
 
 /* ---------- Orders ---------- */
 function renderOrders() {
   const main = appMain;
-  if (!ordersReady) {
-    main.append(el("div", { class: "skel", style: "height: 200px" }));
-    return;
-  }
   if (orders.length === 0) {
     main.append(el("div", { class: "empty-state" },
       el("h3", { text: "No orders yet" }),
@@ -758,7 +586,7 @@ function renderOrders() {
     return;
   }
   main.append(el("div", { class: "section-head" },
-    el("div", {}, el("h2", { text: "My orders" }), el("p", { class: "sub", text: `${orders.length} order${orders.length === 1 ? "" : "s"}` }))
+    el("div", {}, el("h2", { text: "My orders" }), el("p", { class: "sub", text: `${orders.length} order${orders.length === 1 ? "" : "s"} on this device` }))
   ));
   for (const o of orders) {
     const status = (o.status || "PENDING").toUpperCase();
@@ -774,7 +602,7 @@ function renderOrders() {
     const items = Array.isArray(o.items) ? o.items : [];
     const itemText = items.map((i) => `${i.title} ×${i.quantity}`).join(" · ") || "—";
     info.append(el("div", { class: "meta", text: itemText }));
-    const meta2 = el("div", { class: "meta", text: `${o.customerEmail || ""} · ${o.paymentMethod || ""}` });
+    const meta2 = el("div", { class: "meta", text: [o.customerEmail || "", o.paymentMethod || ""].filter(Boolean).join(" · ") });
     info.append(meta2);
     card.append(info);
     const right = el("div", { class: "amt", text: fmtMoney(o.totalCents || 0) });
@@ -787,59 +615,8 @@ function renderOrders() {
   }
 }
 
-/* ---------- Account ---------- */
-function renderAccount() {
-  const main = appMain;
-  const name = currentUser?.displayName || "Bazaar Shopper";
-  const email = currentUser?.email || "";
-  const photo = currentUser?.photoURL;
-  const badge = (currentUser?.email && currentUser.email.toLowerCase() === "abdulmanan304000@gmail.com" && currentUser.emailVerified)
-    ? "Firebase Live Admin" : "Firebase Connected";
-
-  const avatar = el("div", { class: "avatar-lg" });
-  if (photo && /^https?:\/\//i.test(photo)) {
-    avatar.append(el("img", { src: photo, alt: "", referrerpolicy: "no-referrer" }));
-  } else {
-    avatar.textContent = initialsOf(name);
-  }
-
-  const card = el("div", { class: "profile-card" },
-    avatar,
-    el("div", { style: "flex:1; min-width:240px" },
-      el("h2", { text: name }),
-      el("p", { text: email }),
-      el("span", { class: "badge" }, el("svg", { viewBox: "0 0 24 24", width: "13", height: "13", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M12 2l3 6.2L21.5 9.3l-4.7 4.6 1.1 6.6L12 17.8 6.1 20.5l1.1-6.6-4.7-4.6 6.5-1.1z")), badge)
-    )
-  );
-  main.append(card);
-
-  const actions = el("div", { class: "profile-actions" });
-  actions.append(el("a", { class: "panel-btn", href: ADMIN_PORTAL_URL, target: "_blank", rel: "noopener" },
-    el("span", {}, el("span", { text: "Store admin portal" }), el("span", { class: "sub", text: "Manage products, orders and inventory" })),
-    el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M5 12h14M13 5l7 7-7 7"))
-  ));
-  actions.append(el("button", { class: "panel-btn", type: "button", onclick: handleSignOut },
-    el("span", {}, el("span", { text: "Sign out" }), el("span", { class: "sub", text: "Sign out of this device" })),
-    el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"))
-  ));
-  main.append(actions);
-}
-
-/* ---------- Auth lifecycle ---------- */
-onAuthStateChanged(auth, (user) => {
-  currentUser = user;
-  if (user) {
-    syncPromise = null;
-    syncProfile(user);
-    startListeners(user);
-    currentRoute = currentRouteId();
-    render();
-  } else {
-    clearListeners();
-    products = []; cart = []; orders = [];
-    render();
-  }
-});
+/* ---------- Boot ---------- */
+startListeners();
 
 window.addEventListener("hashchange", () => {
   currentRoute = currentRouteId();
