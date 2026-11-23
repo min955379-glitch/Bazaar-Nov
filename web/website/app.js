@@ -29,7 +29,7 @@ const firebaseConfig = {
   storageBucket: "gen-lang-client-0568023966.firebasestorage.app",
 };
 const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b40e";
-const ADMIN_PORTAL_URL = "https://bazaar-admin-min955379-6910.vercel.app";
+const ADMIN_PATH = "admin/";
 const CART_KEY = "bazaar_cart_v1";
 const ORDERS_KEY = "bazaar_orders_v1";
 
@@ -126,6 +126,11 @@ const VIEWS = [
   { id: "orders", label: "Orders" },
   { id: "support", label: "Support" },
 ];
+
+function isAdminHash() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/");
+  return parts[0] === "admin" || (parts[0] === "shop" && parts[1] === "admin");
+}
 
 function currentRouteId() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
@@ -275,7 +280,6 @@ function render() {
   nav.innerHTML = "";
   nav.style.display = "flex";
   foot.style.display = "block";
-  $("#admin-link").href = ADMIN_PORTAL_URL;
   renderNav();
   appMain.innerHTML = "";
   const view = currentRoute;
@@ -613,12 +617,21 @@ function renderSupport() {
 }
 
 /* ---------- Boot ---------- */
+if (isAdminHash()) {
+  location.href = ADMIN_PATH;
+} else {
 startListeners();
+}
 
 window.addEventListener("hashchange", () => {
+  // Keep the suggested short form #/shop/admin and #/admin working by opening the admin page.
+  if (isAdminHash()) {
+    location.href = ADMIN_PATH;
+    return;
+  }
   galleryIndex = 0;
   currentRoute = currentRouteId();
   render();
 });
 
-navigate(currentRouteId());
+if (!isAdminHash()) navigate(currentRouteId());
