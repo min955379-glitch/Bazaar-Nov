@@ -1,0 +1,30 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Bootstrapped admin — the same identity check used by firestore.rules.
+    // Additional admins (admins/{uid} docs) are not enforceable here without a
+    // non-default-database read, so they must use the bootstrap email in this bucket.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+             request.auth.token.email_verified == true &&
+             request.auth.token.email == 'abdulmanan304000@gmail.com';
+    }
+
+    // Product images: anyone can read them (the storefront has no login), only admins can write.
+    match /products/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Everything else: denied.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -8,6 +8,19 @@ import {
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
+/* ---------- Pure helpers (testable, no Firebase) ---------- */
+import {
+  WHATSAPP_PATH,
+  fmtMoney,
+  fmtDate,
+  imgFor,
+  imagesFor,
+  whatsappOrderUrl,
+  whatsappSupportUrl,
+  matchFilters,
+  currentProducts as _currentProducts,
+} from "./helpers.js";
+
 /* ---------- Config (client-side public config; security is enforced by Firestore rules) ---------- */
 const firebaseConfig = {
   apiKey: "AIzaSyBwHTSlynCnwVaOuz4NBybOpC9Wzo8Pkp4",
@@ -19,6 +32,12 @@ const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b4
 const ADMIN_PORTAL_URL = "https://bazaar-admin-min955379-6910.vercel.app";
 const CART_KEY = "bazaar_cart_v1";
 const ORDERS_KEY = "bazaar_orders_v1";
+
+/* ---------- Contact & support constants (editable by the store owner) ---------- */
+const SUPPORT_PHONE_DISPLAY = "0322 1393770";
+const SUPPORT_PHONE_TEL = "+923221393770";
+const SUPPORT_EMAIL = "";                 // optional — paste a support email here to show it
+const SUPPORT_HOURS = "Sunday – Thursday: 9:00 AM – 5:00 PM"; // editable placeholder
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app, DATABASE_ID);
@@ -34,9 +53,10 @@ let searchQuery = "";
 let selectedCategory = null;
 let currentRoute = "shop";
 let unsubscribers = [];
+let galleryIndex = 0;
 
 /* Demo catalog used only when the live Firestore catalog is unavailable (e.g. rules not deployed).
-   Clearly labelled in the UI as a demo. */
+   Clearly labelled in the UI as a demo. Amounts are unchanged; only the symbol/format changed to Rs. */
 const DEMO_CATALOG = [
   { id: "starter_anc_headphones", title: "Obsidian ANC Studio Headphones", description: "Active noise-canceling wireless over-ear headphones with 40-hour battery, plush memory foam earcups, and lossless USB-C audio.", category: "Electronics", priceCents: 18900, stockCount: 18, imageKey: "electronics", active: true, featured: true },
   { id: "starter_cognac_tote", title: "Artisan Cognac Leather Tote", description: "Hand-stitched full-grain vegetable-tanned leather tote with brass hardware and a padded 14-inch laptop sleeve.", category: "Fashion", priceCents: 14500, stockCount: 12, imageKey: "fashion", active: true, featured: true },
@@ -47,8 +67,7 @@ const DEMO_CATALOG = [
 ];
 
 function currentProducts() {
-  if (liveCatalogFailed) return DEMO_CATALOG;
-  return liveProducts;
+  return _currentProducts(liveProducts, liveCatalogFailed, DEMO_CATALOG);
 }
 
 /* ---------- Local persistence helpers ---------- */
@@ -97,50 +116,32 @@ function toast(msg, error = false) {
   toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3600);
 }
 
-function fmtMoney(cents) {
-  return "$" + (cents / 100).toFixed(2);
-}
 
-function fmtDate(d) {
-  if (!d) return "—";
-  try {
-    const date = typeof d.toDate === "function" ? d.toDate() : new Date(d);
-    if (isNaN(date)) return "—";
-    return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  } catch {
-    return "—";
-  }
-}
 
-const PRESETS = {
-  electronics: "assets/img_prod_electronics.jpg",
-  fashion: "assets/img_prod_fashion.jpg",
-  accessories: "assets/img_prod_fashion.jpg",
-  home: "assets/img_prod_home.jpg",
-  hero: "assets/img_hero_banner.jpg",
-};
-
-function imgFor(key) {
-  const t = (key || "").trim();
-  if (/^https:\/\//i.test(t) || /^http:\/\//i.test(t)) return t;
-  return PRESETS[t.toLowerCase()] || PRESETS.electronics;
-}
 
 /* ---------- Navigation ---------- */
 const VIEWS = [
   { id: "shop", label: "Shop" },
   { id: "cart", label: "Cart" },
   { id: "orders", label: "Orders" },
+  { id: "support", label: "Support" },
 ];
 
 function currentRouteId() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
   const v = parts[0] || "shop";
+  if (v === "product") return "product";
   return VIEWS.some((x) => x.id === v) ? v : "shop";
 }
 
-function navigate(view) {
-  location.hash = "#/" + view;
+function productIdFromHash() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/");
+  return parts[0] === "product" ? (parts[1] || "") : "";
+}
+
+function navigate(view, param) {
+  if (param) location.hash = "#/" + view + "/" + encodeURIComponent(param);
+  else location.hash = "#/" + view;
 }
 
 function setView(view) {
@@ -162,7 +163,8 @@ function renderNav() {
       el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "aria-hidden": "true" },
         v.id === "shop" ? path("M3 7l9-4 9 4-9 4-9-4zM3 7v7l9 4 9-4V7M12 11v7") :
         v.id === "cart" ? path("M6 6h15l-2 10H8L6 6zM9 6a3 3 0 016 0") :
-        path("M6 3h12v18l-3-2-3 2-3-2-3 2V3z")
+        v.id === "orders" ? path("M6 3h12v18l-3-2-3 2-3-2-3 2V3z") :
+        path("M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z")
       ),
       el("span", { text: v.label }),
       badge ? el("span", { class: "cart-badge", text: String(badge) }) : null
@@ -226,6 +228,7 @@ function handleAddToCart(product) {
       productId: product.id,
       title: (product.title || "Product").slice(0, 120),
       priceCents: Math.max(1, Math.min(product.priceCents || 1, 100_000_000)),
+      image: imagesFor(product)[0] || "",
       imageKey: (product.imageKey || "electronics").slice(0, 500),
       quantity: qty,
     });
@@ -265,72 +268,18 @@ function handleCancelOrder(order) {
   rerender();
 }
 
-function makeOrderId() {
-  try {
-    if (crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-  } catch {}
-  return `local_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
-}
-
-function handleCheckout({ name, email, address, phone, method }) {
-  if (!cart.length) { toast("Your cart is empty.", true); return; }
-  const trimmedName = name.trim();
-  const trimmedEmail = (email || "").trim();
-  const trimmedAddress = address.trim();
-  const trimmedPhone = phone.trim();
-  if (trimmedName.length < 2 || trimmedName.length > 100) { toast("Please enter a valid recipient name (2–100 chars).", true); return; }
-  if (trimmedEmail.length > 160) { toast("Please enter a valid email (max 160 chars).", true); return; }
-  if (trimmedAddress.length < 5 || trimmedAddress.length > 300) { toast("Please enter a complete shipping address (min 5 chars).", true); return; }
-  if (trimmedPhone.length < 5 || trimmedPhone.length > 30) { toast("Please enter a valid contact phone number.", true); return; }
-
-  const lineItems = cart.map((i) => ({
-    productId: i.productId,
-    title: (i.title || "").slice(0, 120),
-    priceCents: Math.max(1, Math.min(i.priceCents || 1, 100_000_000)),
-    quantity: Math.max(1, Math.min(i.quantity || 1, 50)),
-  }));
-  const totalCents = lineItems.reduce((s, i) => s + i.priceCents * i.quantity, 0);
-  const itemCount = lineItems.reduce((s, i) => s + i.quantity, 0);
-  if (totalCents < 1 || totalCents > 500_000_000) { toast("Order total is out of valid range.", true); return; }
-  if (itemCount < 1 || itemCount > 200) { toast("Item count is out of valid range.", true); return; }
-
-  const order = {
-    id: makeOrderId(),
-    customerName: trimmedName,
-    customerEmail: trimmedEmail,
-    shippingAddress: trimmedAddress,
-    customerPhone: trimmedPhone,
-    paymentMethod: method,
-    status: "PENDING",
-    totalCents,
-    itemCount,
-    items: lineItems,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  orders = [order, ...orders];
-  saveJSON(ORDERS_KEY, orders);
-  cart = [];
-  saveJSON(CART_KEY, cart);
-  toast(`Order #${order.id.slice(0, 6).toUpperCase()} placed!`);
-  navigate("orders");
-}
-
 /* ---------- Views ---------- */
 function render() {
   const nav = $("#nav-tabs");
   const foot = $("#foot");
-  const chip = $("#user-chip");
   nav.innerHTML = "";
   nav.style.display = "flex";
   foot.style.display = "block";
-  if (chip) chip.style.display = "none";
   $("#admin-link").href = ADMIN_PORTAL_URL;
   renderNav();
   appMain.innerHTML = "";
   const view = currentRoute;
-  const renderers = { shop: renderShop, cart: renderCart, orders: renderOrders };
+  const renderers = { shop: renderShop, cart: renderCart, orders: renderOrders, support: renderSupport, product: renderProduct };
   (renderers[view] || renderShop)();
 }
 
@@ -387,8 +336,8 @@ function renderShop() {
     return;
   }
 
-  const featured = products.filter((p) => p.featured && matchFilters(p));
-  const rest = products.filter((p) => !p.featured && matchFilters(p));
+  const featured = products.filter((p) => p.featured && matchFilters(p, selectedCategory, searchQuery));
+  const rest = products.filter((p) => !p.featured && matchFilters(p, selectedCategory, searchQuery));
   const all = [...featured, ...rest];
 
   if (featured.length || rest.length) {
@@ -419,16 +368,6 @@ function renderShop() {
   main.append(grid);
 }
 
-function matchFilters(p) {
-  if (selectedCategory && p.category !== selectedCategory) return false;
-  if (searchQuery) {
-    const q = searchQuery.toLowerCase();
-    const hay = `${p.title} ${p.description || ""} ${p.category || ""}`.toLowerCase();
-    if (!hay.includes(q)) return false;
-  }
-  return true;
-}
-
 function onSearchChange(e) {
   searchQuery = e.target.value;
   const sw = e.target.closest(".search-wrap");
@@ -436,8 +375,8 @@ function onSearchChange(e) {
 }
 
 function featuredCard(p) {
-  const img = imgFor(p.imageKey);
-  return el("div", { class: "featured-card", onclick: () => addToCartSafe(p) },
+  const img = imagesFor(p)[0];
+  return el("div", { class: "featured-card", onclick: () => navigate("product", p.id) },
     el("div", { class: "img" }, el("img", { src: img, alt: p.title, loading: "lazy" })),
     el("div", { class: "body" },
       el("div", { class: "cat", text: (p.category || "").toUpperCase() }),
@@ -448,10 +387,10 @@ function featuredCard(p) {
 }
 
 function productCard(p) {
-  const img = imgFor(p.imageKey);
+  const img = imagesFor(p)[0];
   const outOfStock = (p.stockCount || 0) <= 0;
   const card = el("article", { class: "product-card" });
-  const imgWrap = el("div", { class: "img", onclick: () => addToCartSafe(p) });
+  const imgWrap = el("div", { class: "img", onclick: () => navigate("product", p.id) });
   if (p.featured) {
     imgWrap.append(el("span", { class: "badge" }, el("svg", { viewBox: "0 0 24 24", width: "11", height: "11", fill: "currentColor" }, el("path", { d: "M12 2l2.9 6.26L21.5 9.3l-4.75 4.63L17.8 21 12 17.8 6.2 21l1.05-7.07L2.5 9.3l6.6-1.04z" })), "Featured"));
   }
@@ -459,7 +398,7 @@ function productCard(p) {
   card.append(imgWrap);
   card.append(el("div", { class: "body" },
     el("div", { class: "cat", text: (p.category || "").toUpperCase() }),
-    el("h3", { text: p.title }),
+    el("h3", { text: p.title, onclick: () => navigate("product", p.id) }),
     el("div", { class: "price-row" },
       el("span", { class: "price", text: fmtMoney(p.priceCents || 0) }),
       el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : `${p.stockCount} left` })
@@ -471,17 +410,78 @@ function productCard(p) {
       onclick: (ev) => { ev.stopPropagation(); handleAddToCart(p); },
     },
       el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M6 6h15l-2 10H8L6 6zM9 6a3 3 0 016 0")),
-      outOfStock ? "Sold Out" : "Add"
+      outOfStock ? "Sold Out" : "Add to Cart"
     )
   ));
   return card;
 }
 
-function addToCartSafe(p) {
-  handleAddToCart(p);
+/* ---------- Product detail (gallery) ---------- */
+function renderProduct() {
+  const main = appMain;
+  const id = productIdFromHash();
+  const product = currentProducts().find((p) => p.id === id);
+  if (!product) {
+    main.append(el("div", { class: "empty-state" },
+      el("h3", { text: "Product not found" }),
+      el("p", { text: "This product may have been removed from the catalog." }),
+      el("button", { class: "panel-btn", style: "margin-top:16px; max-width:260px", onclick: () => navigate("shop") }, el("span", { text: "Back to shop" }))
+    ));
+    return;
+  }
+
+  const images = imagesFor(product);
+  const gallery = el("div", { class: "gallery" });
+  const mainImgWrap = el("div", { class: "gallery-main" });
+  mainImgWrap.append(el("img", { src: images[galleryIndex % images.length], alt: product.title || "Product image" }));
+  gallery.append(mainImgWrap);
+  if (images.length > 1) {
+    const thumbs = el("div", { class: "gallery-thumbs" });
+    images.forEach((src, i) => {
+      thumbs.append(el("button", {
+        class: "gallery-thumb" + (i === galleryIndex % images.length ? " active" : ""),
+        type: "button",
+        "aria-label": `View image ${i + 1}`,
+        onclick: () => { galleryIndex = i; rerender(); },
+      },
+        el("img", { src, alt: `Thumbnail ${i + 1}` })
+      ));
+    });
+    gallery.append(thumbs);
+  }
+
+  const outOfStock = (product.stockCount || 0) <= 0;
+  const info = el("div", { class: "product-detail" },
+    el("button", { class: "back-link", type: "button", onclick: () => navigate("shop") }, "← Back to shop"),
+    el("div", { class: "cat", text: (product.category || "").toUpperCase() }),
+    el("h1", { text: product.title }),
+    el("div", { class: "price-row" },
+      el("span", { class: "price", text: fmtMoney(product.priceCents || 0) }),
+      el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : `${product.stockCount} left` })
+    ),
+    el("p", { class: "desc", text: product.description || "" }),
+    el("button", {
+      class: "add-btn det-add-btn",
+      type: "button",
+      disabled: outOfStock,
+      onclick: () => handleAddToCart(product),
+    },
+      el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M6 6h15l-2 10H8L6 6zM9 6a3 3 0 016 0")),
+      outOfStock ? "Sold Out" : "Add to Cart"
+    )
+  );
+
+  galleryIndex = galleryIndex % images.length;
+
+  const layout = el("div", { class: "product-layout" }, gallery, info);
+  main.append(layout);
 }
 
 /* ---------- Cart ---------- */
+function cartLineImage(item) {
+  return item.image || imgFor(item.imageKey || "");
+}
+
 function renderCart() {
   const main = appMain;
 
@@ -502,7 +502,7 @@ function renderCart() {
     el("div", { class: "head" }, el("h2", { text: `Cart (${cart.length})` }), el("span", { class: "sub", style: "color:var(--muted);font-size:.8rem", text: "Saved on this device" }))
   );
   for (const item of cart) {
-    const img = imgFor(item.imageKey);
+    const img = cartLineImage(item);
     const product = products.find((p) => p.id === item.productId);
     const maxStock = product ? product.stockCount : 50;
     cartCard.append(el("div", { class: "cart-line" },
@@ -526,53 +526,21 @@ function renderCart() {
     el("span", { class: "amt", text: fmtMoney(subtotal) })
   ));
 
-  const checkoutCard = el("div", { class: "cart-card checkout-card" },
+  const waCard = el("div", { class: "cart-card checkout-card whatsapp-card" },
     el("div", { class: "head" }, el("h2", { text: "Checkout" })),
-    el("div", { class: "checkout-body" })
-  );
-  const body = checkoutCard.lastElementChild;
-
-  const name = field("Recipient name", "input", "checkout-name", "Full name", "");
-  const email = field("Email (optional)", "input", "checkout-email", "you@example.com", "");
-  const address = field("Shipping address", "textarea", "checkout-address", "Street, city, postal code", "");
-  const phone = field("Phone", "input", "checkout-phone", "+92 300 0000000", "");
-  const method = el("div", { class: "field" },
-    el("label", { text: "Payment method", for: "checkout-method" }),
-    el("select", { id: "checkout-method" },
-      el("option", { text: "Cash on Delivery", value: "Cash on Delivery" }),
-      el("option", { text: "Card on Delivery", value: "Card on Delivery" }),
-      el("option", { text: "Digital Wallet", value: "Digital Wallet" })
+    el("div", { class: "checkout-body" },
+      el("p", { class: "note", text: "Checkout happens on WhatsApp — we confirm your order and delivery address there." }),
+      el("a", { class: "wa-btn", href: whatsappOrderUrl(cart), target: "_blank", rel: "noopener" },
+        el("svg", { viewBox: "0 0 24 24", fill: "currentColor", "aria-hidden": "true" }, el("path", { d: WHATSAPP_PATH })),
+        "Buy on WhatsApp"
+      ),
+      el("div", { class: "wa-total" }, el("span", { text: "Grand total" }), el("b", { text: fmtMoney(subtotal) })),
+      el("p", { class: "note", text: "You'll confirm your name and delivery address in the chat with the shop." })
     )
   );
-  body.append(name.wrapper, email.wrapper, address.wrapper, phone.wrapper, method);
 
-  const btn = el("button", { class: "place-btn", type: "button", onclick: onCheckoutClick },
-    el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2" }, path("M5 22l14-14-3.5-3.5L1.5 18.5 1 23z")),
-    `Place Order · ${fmtMoney(subtotal)}`
-  );
-  body.append(btn);
-  body.append(el("p", { class: "note", text: "Orders are stored on this device only. No sign-in required." }));
-
-  grid.append(cartCard, checkoutCard);
+  grid.append(cartCard, waCard);
   main.append(grid);
-}
-
-function field(label, kind, id, placeholder, value) {
-  const input = el(kind, { id, placeholder, value, ...(kind === "textarea" ? { rows: "2" } : { type: "text" }) });
-  const wrapper = el("div", { class: "field" },
-    el("label", { text: label, for: id }),
-    input
-  );
-  return { wrapper, input, label };
-}
-
-function onCheckoutClick() {
-  const name = $("#checkout-name")?.value ?? "";
-  const email = $("#checkout-email")?.value ?? "";
-  const address = $("#checkout-address")?.value ?? "";
-  const phone = $("#checkout-phone")?.value ?? "";
-  const method = $("#checkout-method")?.value ?? "Cash on Delivery";
-  handleCheckout({ name, email, address, phone, method });
 }
 
 /* ---------- Orders ---------- */
@@ -615,10 +583,40 @@ function renderOrders() {
   }
 }
 
+/* ---------- Support ---------- */
+function renderSupport() {
+  const main = appMain;
+  const supportCard = el("div", { class: "support-card" },
+    el("div", { class: "support-icon", "aria-hidden": "true" },
+      el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" }, path("M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"))
+    ),
+    el("h1", { text: "Need help?" }),
+    el("p", { class: "support-lead", text: "Our support team is here for you. Get a reply, fix your order, or ask about an item — we're happy to help." }),
+    el("a", { class: "wa-btn support-cta", href: whatsappSupportUrl(), target: "_blank", rel: "noopener" },
+      el("svg", { viewBox: "0 0 24 24", fill: "currentColor", "aria-hidden": "true" }, el("path", { d: WHATSAPP_PATH })),
+      "Chat with Support"
+    ),
+    el("div", { class: "support-facts" },
+      el("div", { class: "support-fact" },
+        el("span", { class: "support-fact-label", text: "Phone" }),
+        el("a", { class: "support-fact-link", href: `tel:${SUPPORT_PHONE_TEL}`, text: SUPPORT_PHONE_DISPLAY })
+      ),
+      el("div", { class: "support-fact" },
+        el("span", { class: "support-fact-label", text: "Support hours" }),
+        el("span", { class: "support-fact-value", text: SUPPORT_HOURS })
+      )
+    ),
+    SUPPORT_EMAIL ? el("p", { class: "support-email", text: `Email: ${SUPPORT_EMAIL}` }) : null,
+    el("p", { class: "support-tip", text: "Tip: WhatsApp is the fastest way to reach us. You'll get a quick reply right in the chat." })
+  );
+  main.append(supportCard);
+}
+
 /* ---------- Boot ---------- */
 startListeners();
 
 window.addEventListener("hashchange", () => {
+  galleryIndex = 0;
   currentRoute = currentRouteId();
   render();
 });
