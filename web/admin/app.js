@@ -1,74 +1,39 @@
-/* ===== Bazaar admin portal — Google sign-in + Firestore + Firebase Storage ===== */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut,
-  onAuthStateChanged,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {
-  getFirestore,
-  collection,
-  onSnapshot,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-  deleteObject,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+/* ===== Bazaar admin portal — Supabase Auth (username + password) + Supabase DB/Storage =====
+   No Google sign-in, no email field, no sign-up, no forgot-password.
+   The username is converted to a hidden email (username + "@bazaar.local") for Supabase Auth.
+   The password is typed by the user and sent to Supabase — never stored or hardcoded.
+   Only this one signed-in admin can ADD/EDIT/DELETE products and images (see Row Level Security). */
 
-/* ---------- Config (client-side public config; security is enforced by Firestore rules) ---------- */
-const firebaseConfig = {
-  apiKey: "AIzaSyBwHTSlynCnwVaOuz4NBybOpC9Wzo8Pkp4",
-  authDomain: "gen-lang-client-0568023966.firebaseapp.com",
-  projectId: "gen-lang-client-0568023966",
-  storageBucket: "gen-lang-client-0568023966.firebasestorage.app",
-};
-const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b40e";
-const BOOTSTRAP_ADMIN_EMAIL = "abdulmanan304000@gmail.com";
-const PRESETS = {
-  electronics: "assets/img_prod_electronics.jpg",
-  fashion: "assets/img_prod_fashion.jpg",
-  accessories: "assets/img_prod_fashion.jpg",
-  home: "assets/img_prod_home.jpg",
-};
+/* ---------- Config (public only — RLS enforces the real access control) ---------- */
+const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
+const HIDDEN_EMAIL_DOMAIN = "bazaar.local";
+const BUCKET = "product-images";
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;   // safety net: reject huge uploads before compressing
+const MIN_IMAGES = 2;
+const MAX_IMAGES = 3;
+const MAX_PRICE = 10_000_000;
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app, DATABASE_ID);
-const storage = getStorage(app);
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /* ---------- State ---------- */
-let authUser = null;          // signed-in Firebase user (or null)
-let adminStatus = "loading";  // loading | signed-out | admin | not-admin
+let authUser = null;          // signed-in Supabase user (or null)
+let username = "";            // display username derived from the hidden email
+let adminStatus = "loading";  // loading | signed-out | signed-in
 let products = [];
-let orders = [];
-let productsReady = false, ordersReady = false;
-let productsError = null, ordersError = null;
-let tab = "products";          // products | orders
-let adminError = null;
-let authError = null;
-let signInBusy = false;
-
-/* Product form state */
-let viewMode = "list";         // list | form
+let productsReady = false;
+let productsError = null;
+let viewMode = "list";          // list | form
 let editingId = null;          // id when editing (null = add)
-let formImages = [];           // [{ which: "kept"|"new", url?, file?, oldIndex?, tempUrl? }]
+let formImages = [];           // [{ which, url?, file?, oldIndex?, tempUrl? }]
 let removedIndexes = [];       // old indexes of kept images the user removed
 let saving = false;
-let pendingDelete = null;      // product id being deleted (for confirm)
 let formDraft = null;          // { name, pricePKR, desc, active } — survives re-renders
-
-let unsubscribers = [];
+let failedAttempts = 0;
+let lockedUntil = 0;           // Date.now() timestamp while locked out
+let signInBusy = false;
+let authError = null;
+let deletePending = null;
 
 /* ---------- Helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -99,35 +64,41 @@ function toast(msg, error = false) {
   toastEl.classList.toggle("error", error);
   toastEl.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 4000);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 5000);
 }
 
-function fmtMoney(cents) {
-  const n = Math.round((Number(cents) || 0) / 100);
-  return "Rs " + n.toLocaleString("en-US");
+function fmtPKR(n) {
+  return "Rs " + Math.round(Number(n) || 0).toLocaleString("en-US");
 }
 
 function fmtDate(d) {
   if (!d) return "—";
   try {
-    const date = typeof d.toDate === "function" ? d.toDate() : new Date(d);
+    const date = new Date(d);
     if (isNaN(date)) return "—";
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   } catch { return "—"; }
 }
 
-function imgFor(key) {
-  const t = (key || "").trim();
-  if (/^https:\/\//i.test(t) || /^http:\/\//i.test(t)) return t;
-  return PRESETS[t.toLowerCase()] || PRESETS.electronics;
+function hiddenEmail(u) {
+  return `${String(u || "").trim().toLowerCase()}@${HIDDEN_EMAIL_DOMAIN}`;
 }
 
-function imagesFor(p) {
-  const list = Array.isArray(p && p.images)
-    ? p.images.filter((s) => typeof s === "string" && /^https?:\/\//i.test(s))
-    : [];
-  if (list.length) return list;
-  return [imgFor((p && p.imageKey) || "")];
+function usernameFromEmail(email) {
+  const s = String(email || "");
+  const suffix = `@${HIDDEN_EMAIL_DOMAIN}`;
+  if (s.endsWith(suffix)) return s.slice(0, -suffix.length);
+  return s;
+}
+
+function pathFromUrl(url) {
+  const m = String(url || "").match(/\/product-images\/(.+?)(\?.*)?$/);
+  return m ? m[1] : null;
+}
+
+function lockoutSecondsLeft() {
+  const left = Math.ceil((lockedUntil - Date.now()) / 1000);
+  return left > 0 ? left : 0;
 }
 
 function path(d, extra = {}) {
@@ -146,104 +117,132 @@ function iconUpload() {
   return el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" }, path("M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"));
 }
 
-/* ---------- Auth ---------- */
-async function handleSignIn() {
+/* ---------- Auth (username + password → hidden email) ---------- */
+function onAuthStateChange(event, session) {
+  const user = session?.user || null;
+  if (user) {
+    username = usernameFromEmail(user.email);
+    adminStatus = "signed-in";
+    authUser = user;
+    if (authError) authError = null;
+    if (failedAttempts > 0) failedAttempts = 0;
+    render();
+    loadProducts();
+  } else {
+    authUser = null;
+    username = "";
+    adminStatus = "signed-out";
+    products = [];
+    productsReady = false;
+    productsError = null;
+    viewMode = "list";
+    editingId = null;
+    formImages = [];
+    removedIndexes = [];
+    formDraft = null;
+    render();
+  }
+}
+
+supabase.auth.onAuthStateChange(onAuthStateChange);
+
+async function handleSignIn(e) {
+  e?.preventDefault?.();
   if (signInBusy) return;
+
+  const locked = lockoutSecondsLeft();
+  if (locked > 0) {
+    authError = `Too many failed attempts — try again in ${locked} seconds.`;
+    render();
+    return;
+  }
+
+  const usernameInput = ($("#f-username")?.value || "").trim();
+  const passwordInput = $("#f-password")?.value || "";
+
+  if (!usernameInput || !passwordInput) {
+    authError = "Enter your username and password.";
+    render();
+    return;
+  }
+
+  const email = hiddenEmail(usernameInput);
   signInBusy = true;
   authError = null;
   render();
+
   try {
-    const provider = new GoogleAuthProvider();
-    const cred = await signInWithPopup(auth, provider);
-    authUser = cred.user;
-  } catch (e) {
-    console.error(e);
-    if (e?.code && e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
-      authError = "Sign-in failed. Is Firebase Auth enabled and authorized for this domain in the Firebase Console?";
+    const { error } = await supabase.auth.signInWithPassword({ email, password: passwordInput });
+    if (error) {
+      failedAttempts += 1;
+      if (failedAttempts >= 5) lockedUntil = Date.now() + 30_000;
+      const msg = String(error.message || "").toLowerCase();
+      if (msg.includes("rate") || msg.includes("too many") || msg.includes("limit")) {
+        authError = "Too many failed attempts — please wait and try again.";
+      } else if (msg.includes("network") || msg.includes("fetch") || msg.includes("failed to fetch") || msg.includes("connection")) {
+        authError = "Could not reach the sign-in service — check the internet connection.";
+      } else {
+        // deliberately do NOT show the real Supabase error to avoid leaking account state
+        authError = "Wrong username or password";
+      }
+      render();
+      return;
     }
+    // success — onAuthStateChange will handle the transition
+    failedAttempts = 0;
+    lockedUntil = 0;
+    authError = null;
+  } catch (err) {
+    console.error(err);
+    failedAttempts += 1;
+    if (msgFailedToFetch(err)) {
+      authError = "Could not reach the sign-in service — check the internet connection.";
+    } else {
+      authError = "Wrong username or password";
+    }
+    if (failedAttempts >= 5) lockedUntil = Date.now() + 30_000;
+    render();
   } finally {
     signInBusy = false;
-    // onAuthStateChanged will also fire and re-render
+    render();
   }
+}
+
+function msgFailedToFetch(err) {
+  const m = String(err?.message || err || "").toLowerCase();
+  return m.includes("fetch") || m.includes("network") || m.includes("connection");
 }
 
 async function handleSignOut() {
-  try { await signOut(auth); } catch (e) { console.error(e); }
+  try { await supabase.auth.signOut(); } catch (e) { console.error(e); }
 }
 
-async function checkAdmin(user) {
-  if (!user) return "signed-out";
-  const isBootstrap = user.emailVerified && user.email === BOOTSTRAP_ADMIN_EMAIL;
-  if (isBootstrap) return "admin";
-  try {
-    const d = await getDoc(doc(db, "admins", user.uid));
-    if (d.exists()) return "admin";
-  } catch (e) { console.error(e); }
-  return "not-admin";
-}
-
-onAuthStateChanged(auth, async (user) => {
-  authUser = user;
-  adminStatus = "loading";
-  adminError = null;
+/* ---------- Data loading ---------- */
+async function loadProducts() {
+  productsReady = false;
+  productsError = null;
   render();
-  if (user) {
-    adminStatus = await checkAdmin(user);
-    if (adminStatus === "admin") startListeners();
-    else clearListeners();
-  } else {
-    adminStatus = "signed-out";
-    clearListeners();
+  const { data, error } = await supabase
+    .from("products")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (error) {
+    console.error(error);
+    productsError = error.message || "Could not load products.";
+    productsReady = true;
+    render();
+    return;
   }
+  products = (data || []).filter((p) => p && typeof p.name === "string");
+  productsReady = true;
   render();
-});
-
-/* ---------- Firestore listeners (read-only) ---------- */
-function clearListeners() {
-  unsubscribers.forEach((u) => { try { u(); } catch {} });
-  unsubscribers = [];
-}
-
-function startListeners() {
-  clearListeners();
-  products = []; orders = [];
-  productsReady = ordersReady = false;
-  productsError = ordersError = null;
-
-  unsubscribers.push(onSnapshot(collection(db, "products"), (snap) => {
-    products = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .filter((p) => p && typeof p.title === "string")
-      .sort((a, b) => (b.updatedAt?.toMillis?.() ?? b.createdAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? a.createdAt?.toMillis?.() ?? 0));
-    productsReady = true;
-    productsError = null;
-    render();
-  }, (err) => {
-    console.error(err);
-    productsError = "Could not load products (Firestore permission denied?).";
-    productsReady = true;
-    render();
-  }));
-
-  unsubscribers.push(onSnapshot(collection(db, "orders"), (snap) => {
-    orders = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .filter((o) => o && typeof o.status === "string")
-      .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-    ordersReady = true;
-    ordersError = null;
-    render();
-  }, (err) => {
-    console.error(err);
-    ordersError = "Could not load orders (Firestore permission denied?).";
-    ordersReady = true;
-    render();
-  }));
 }
 
 /* ---------- Rendering ---------- */
 function render() {
   const nav = $("#nav-tabs");
   nav.innerHTML = "";
-  if (adminStatus !== "admin") {
+  if (adminStatus !== "signed-in") {
     nav.style.display = "none";
     appMain.innerHTML = "";
     appMain.append(gateView());
@@ -257,80 +256,90 @@ function render() {
 
 function renderNav() {
   const nav = $("#nav-tabs");
-  const tabs = [
-    { id: "products", label: "Products" },
-    { id: "orders", label: "Orders", count: orders.length },
-  ];
-  for (const t of tabs) {
-    nav.append(el("button", {
-      class: "nav-tab" + (tab === t.id ? " active" : ""),
-      type: "button",
-      onclick: () => { tab = t.id; if (tab === "orders") viewMode = "list"; render(); },
-    }, t.label + (t.count ? ` (${t.count})` : "")));
-  }
+  const chip = el("div", { class: "user-chip" },
+    el("span", { class: "who" },
+      el("span", { class: "name", text: username || "Admin" }),
+      el("span", { class: "role", text: "Administrator" })
+    ),
+    el("button", { class: "icon-btn", type: "button", title: "Sign out", "aria-label": "Sign out", onclick: handleSignOut }, signOutIcon())
+  );
+  nav.append(chip);
+}
+
+function signOutIcon() {
+  return el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" },
+    path("M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"),
+    path("M16 17l5-5-5-5"),
+    path("M21 12H9")
+  );
 }
 
 /* ---------- Gate / sign-in ---------- */
 function gateView() {
   if (adminStatus === "loading") {
-    return el("div", { class: "gate-wrap" }, el("div", { class: "gate-card" }, el("div", { class: "content" }, el("h1", { text: "Loading…" }), el("p", { class: "sub", text: "Checking admin access." }))));
+    return el("div", { class: "gate-wrap" }, el("div", { class: "gate-card" }, el("div", { class: "content" }, el("h1", { text: "Loading…" }), el("p", { class: "sub", text: "Checking admin session." }))));
   }
-  if (adminStatus === "signed-out" || adminStatus === "not-admin") {
-    const notAdmin = adminStatus === "not-admin";
-    const err = authError || (notAdmin ? "This account does not have admin access. Ask the bootstrap admin to add your email to the admins collection." : "");
-    return el("div", { class: "gate-wrap" },
-      el("div", { class: "gate-card" },
-        el("div", { class: "hero-top" },
-          el("img", { src: "assets/img_hero_banner.jpg", alt: "" }),
-          el("div", { class: "scrim" }),
-          el("span", { class: "pill", text: "Admin access" })
-        ),
-        el("div", { class: "content" },
-          el("h1", { text: notAdmin ? "Not authorized" : "Sign in to manage Bazaar" }),
-          el("p", { class: "sub", text: notAdmin ? err : "Sign in with Google to view products and manage the catalog. You'll need an admin account." }),
-          notAdmin
-            ? el("button", { class: "primary-btn", type: "button", onclick: handleSignOut }, "Sign out")
-            : el("button", { class: "google-btn", type: "button", onclick: handleSignIn, disabled: signInBusy },
-                el("svg", { viewBox: "0 0 24 24", width: "20", height: "20" },
-                  el("path", { fill: "#4285F4", d: "M23.15 12.35c0-.78-.07-1.53-.19-2.26H12v4.28h6.34c-.27 1.45-1.13 2.68-2.4 3.5v2.92h3.87c2.27-2.09 3.59-5.17 3.59-8.44z" }),
-                  el("path", { fill: "#34A853", d: "M12 24c3.24 0 5.95-1.07 7.93-2.9l-3.87-2.92c-1.07.72-2.44 1.15-4.06 1.15-3.11 0-5.76-2.1-6.7-4.93H1.54v3.02C3.53 21.3 7.48 24 12 24z" }),
-                  el("path", { fill: "#FBBC05", d: "M5.3 14.51A7.27 7.27 0 014.9 12c0-.81.14-1.59.4-2.31V6.47H1.54A11.95 11.95 0 000 12c0 1.92.46 3.73 1.54 5.33l3.76-2.82z" }),
-                  el("path", { fill: "#EA4335", d: "M12 4.7c1.77 0 3.36.61 4.6 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0 7.48 0 3.53 2.7 1.54 6.47l3.76 2.82C6.24 6.8 8.89 4.7 12 4.7z" })),
-                signInBusy ? "Signing in…" : "Continue with Google"
-              ),
-          err && !notAdmin ? el("p", { class: "gate-err show", text: err }) : null,
-          notAdmin && authUser ? el("p", { class: "sub", style: "font-size:.8rem;color:var(--muted);margin-top:14px", text: `Signed in as ${authUser.email || "this account"}` }) : null
-        )
+  const locked = lockoutSecondsLeft();
+  const passwordField = el("div", { class: "field" },
+    el("label", { text: "Password", for: "f-password" }),
+    el("input", { id: "f-password", type: "password", autocomplete: "current-password", placeholder: "Enter your password", required: "", autocapitalize: "off", autocorrect: "off", spellcheck: "false" })
+  );
+  const usernameField = el("div", { class: "field" },
+    el("label", { text: "Username", for: "f-username" }),
+    el("input", { id: "f-username", type: "text", autocomplete: "username", placeholder: "Username", required: "", autocapitalize: "none", autocorrect: "off", spellcheck: "false" })
+  );
+  const error = authError;
+
+  const signInBtn = el("button", {
+    class: "primary-btn wide", type: "submit", id: "f-sign-in", disabled: signInBusy || locked > 0, onclick: null,
+  },
+    signInBusy ? "Signing in…" : (locked > 0 ? `Locked — try again in ${locked}s` : "Sign in")
+  );
+
+  const form = el("form", { class: "gate-form", onsubmit: handleSignIn },
+    el("p", { class: "sub", style: "margin:0 0 0", text: "Sign in with your username and password to manage the catalog." }),
+    usernameField,
+    passwordField,
+    error ? el("p", { class: "gate-err show", text: error }) : null,
+    signInBtn,
+    el("p", { class: "hint", style: "text-align:center", text: "Only the Bazaar administrator can sign in here." })
+  );
+
+  return el("div", { class: "gate-wrap" },
+    el("div", { class: "gate-card" },
+      el("div", { class: "hero-top" },
+        el("img", { src: "assets/img_hero_banner.jpg", alt: "" }),
+        el("div", { class: "scrim" }),
+        el("span", { class: "pill", text: "Admin access" })
+      ),
+      el("div", { class: "content" },
+        el("h1", { text: "Sign in to manage Bazaar" }),
+        form
       )
-    );
-  }
-  return el("div", { class: "gate-wrap" }, el("div", { class: "gate-card" }, el("div", { class: "content" }, el("h1", { text: "Loading…" }))));
+    )
+  );
 }
 
 /* ---------- Dashboard ---------- */
-function kpiStrip(productsCount, pendingCount, revenueCents, stockTotal) {
-  const kpi = (label, value, sub) => el("div", { class: "kpi" }, el("div", { class: "label", text: label }), el("div", { class: "value" }, value, sub ? el("small", { text: " " + sub }) : null));
+function kpiStrip(productsCount, inStockCount, hiddenCount) {
+  const kpi = (label, value) => el("div", { class: "kpi" }, el("div", { class: "label", text: label }), el("div", { class: "value" }, value));
   return el("div", { class: "kpis" },
-    kpi("Products", String(productsCount), `${stockTotal} in stock`),
-    kpi("Pending orders", String(pendingCount)),
-    kpi("Revenue", fmtMoney(revenueCents), "ex-cancelled")
+    kpi("Products", String(productsCount)),
+    kpi("In stock", String(inStockCount)),
+    kpi("Hidden", String(hiddenCount))
   );
 }
 
 function signedInChip() {
-  if (!authUser) return null;
-  const email = authUser.email || "account";
   return el("div", { class: "signed-in-chip" },
-    el("span", { class: "signed-in-email", text: email }),
+    el("span", { class: "signed-in-email", text: username || "Administrator" }),
     el("button", { class: "secondary-btn", type: "button", onclick: handleSignOut, text: "Sign out" })
   );
 }
 
 function dashboardView() {
-  const nonCancelled = orders.filter((o) => o.status !== "CANCELLED");
-  const revenueCents = nonCancelled.reduce((s, o) => s + (o.totalCents || 0), 0);
-  const pendingCount = orders.filter((o) => o.status === "PENDING").length;
-  const stockTotal = products.reduce((s, p) => s + (p.stockCount || 0), 0);
+  const inStock = products.filter((p) => p.in_stock !== false).length;
+  const hidden = products.filter((p) => p.in_stock === false).length;
 
   const head = el("div", { class: "dash-head" },
     el("div", {},
@@ -340,36 +349,26 @@ function dashboardView() {
     signedInChip()
   );
 
-  const tabRow = el("div", { class: "tab-row" });
-  for (const t of ["products", "orders"]) {
-    tabRow.append(el("button", {
-      class: "tab-btn" + (tab === t ? " active" : ""),
-      type: "button",
-      onclick: () => { tab = t; if (t === "orders") viewMode = "list"; render(); },
-      text: t.charAt(0).toUpperCase() + t.slice(1) + (t === "orders" ? ` (${orders.length})` : ""),
-    }));
-  }
-
   const content = el("div", {});
-  if (tab === "products") content.append(productsTab());
-  else content.append(ordersTab(revenueCents, pendingCount, products.length, stockTotal));
+  content.append(productsTab(products.length, inStock, hidden));
 
-  return el("div", {}, head, kpiStrip(products.length, pendingCount, revenueCents, stockTotal), tabRow, content);
+  return el("div", {}, head, kpiStrip(products.length, inStock, hidden), content);
 }
 
 /* ---------- Products tab ---------- */
 function productsTab() {
   const wrap = el("div", {});
-  const stockTotal = products.reduce((s, p) => s + (p.stockCount || 0), 0);
 
   if (viewMode === "form") {
     wrap.append(productForm());
     return wrap;
   }
 
+  const inStock = products.filter((p) => p.in_stock !== false).length;
+
   wrap.append(el("div", { class: "section-title" },
     el("h2", { text: "Catalog" }),
-    el("span", { class: "hint", style: "color:var(--muted);font-size:.8rem", text: `${products.length} product${products.length === 1 ? "" : "s"} · ${stockTotal} in stock` })
+    el("span", { class: "hint", style: "color:var(--muted);font-size:.8rem", text: `${products.length} product${products.length === 1 ? "" : "s"} · ${inStock} in stock` })
   ));
 
   const addBtn = el("button", { class: "primary-btn", type: "button", onclick: () => openForm(null) }, iconUpload(), "Add product");
@@ -399,20 +398,18 @@ function productsTab() {
 
 function productRow(p) {
   const row = el("div", { class: "product-row" });
-  const imgs = imagesFor(p);
-  row.append(el("img", { src: imgs[0], alt: p.title, loading: "lazy" }));
+  const imgs = Array.isArray(p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
+  row.append(imgs.length ? el("img", { src: imgs[0], alt: p.name, loading: "lazy" }) : el("img", { src: "assets/img_hero_banner.jpg", alt: "", loading: "lazy" }));
   const meta = el("div", { class: "m" });
   meta.append(
-    el("span", { text: (p.category || "").toUpperCase() }),
-    el("b", { text: fmtMoney(p.priceCents || 0) }),
-    el("span", { text: `${p.stockCount || 0} in stock` }),
-    el("span", { text: p.featured ? "Featured" : "" }),
-    el("span", { text: p.active ? "In stock" : "Hidden" })
+    el("b", { text: fmtPKR(p.price) }),
+    el("span", { text: p.in_stock === false ? "Hidden" : "In stock" }),
+    el("span", { text: fmtDate(p.created_at) })
   );
-  row.append(el("div", { class: "info" }, el("div", { class: "t", text: p.title }), meta));
+  row.append(el("div", { class: "info" }, el("div", { class: "t", text: p.name }), meta));
   const actions = el("div", { class: "actions" },
-    el("button", { class: "edit-btn", type: "button", onclick: () => openForm(p.id) }, "Edit"),
-    el("button", { class: "edit-btn danger", type: "button", onclick: () => handleDelete(p) }, "Delete")
+    el("button", { class: "edit-btn", type: "button", onclick: () => openForm(p.id), text: "Edit" }),
+    el("button", { class: "edit-btn danger", type: "button", onclick: () => handleDelete(p), text: "Delete" })
   );
   row.append(actions);
   return row;
@@ -425,11 +422,12 @@ function openForm(id) {
   removedIndexes = [];
   if (id) {
     const p = products.find((x) => x.id === id);
-    const kept = Array.isArray(p && p.images) ? p.images : [];
+    const kept = Array.isArray(p && p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
     formImages = kept.map((url, i) => ({ which: "kept", url, oldIndex: i }));
   } else {
     formImages = [];
   }
+  formDraft = null;
   render();
 }
 
@@ -452,19 +450,18 @@ function productForm() {
   const sheet = el("div", { class: "sheet" });
   sheet.append(el("h3", { text: isEdit ? "Edit product" : "Add product" }));
 
-  // basic fields
   const d = formDraft;
   const nameField = el("div", { class: "field" },
     el("label", { text: "Name", for: "f-name" }),
-    el("input", { id: "f-name", type: "text", value: d ? d.name : (isEdit ? p.title : ""), placeholder: "e.g. Obsidian ANC Headphones", maxlength: "120", required: "" })
+    el("input", { id: "f-name", type: "text", value: d ? d.name : (isEdit ? p.name : ""), placeholder: "e.g. Obsidian ANC Headphones", maxlength: "120", required: "" })
   );
   const priceField = el("div", { class: "field" },
     el("label", { text: "Price (PKR)", for: "f-price" }),
-    el("input", { id: "f-price", type: "number", min: "1", step: "1", value: d ? d.pricePKR : (isEdit ? Math.round((p.priceCents || 0) / 100) : ""), placeholder: "1500", required: "" })
+    el("input", { id: "f-price", type: "number", min: "1", step: "1", value: d ? d.pricePKR : (isEdit ? Math.round(Number(p.price) || 0) : ""), placeholder: "1500", required: "" })
   );
   const stockField = el("div", { class: "field" },
     el("label", { class: "toggle-label", style: "display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:0.92rem;font-weight:700;color:var(--ink);text-transform:none;letter-spacing:0" },
-      el("input", { type: "checkbox", id: "f-active", checked: d ? d.active : (isEdit ? p.active !== false : true) }),
+      el("input", { type: "checkbox", id: "f-active", checked: d ? d.active : (isEdit ? p.in_stock !== false : true) }),
       "In stock (visible on storefront)"
     )
   );
@@ -480,18 +477,16 @@ function productForm() {
 
   // images
   sheet.append(el("div", { class: "field full" },
-    el("label", { text: `Images (${formImages.length}/3) — 2 or 3 required`, for: "f-images" }),
+    el("label", { text: `Images (${formImages.length}/${MAX_IMAGES}) — ${MIN_IMAGES} or ${MAX_IMAGES} required`, for: "f-images" }),
     el("div", { class: "image-grid", id: "form-images" })
   ));
-  const hint = el("p", { class: "hint", text: "Images are compressed in the browser and uploaded to Firebase Storage — the storefront reads them automatically." });
+  const hint = el("p", { class: "hint", text: "Images are compressed in the browser and uploaded to Supabase Storage." });
   sheet.append(hint);
 
-  // add image button
   const addBtn = el("button", { class: "secondary-btn", type: "button", id: "f-add-images", onclick: () => $("#f-image-input")?.click() }, iconUpload(), "Add images");
   const hidden = el("input", { id: "f-image-input", type: "file", accept: "image/*", multiple: "", style: "display:none", onchange: onImagesPicked });
   sheet.append(el("div", { class: "image-actions" }, addBtn, hidden));
 
-  // actions
   const actions = el("div", { class: "form-actions" },
     el("button", { class: "primary-btn", type: "button", id: "f-save", onclick: submitProductForm, disabled: saving }, saving ? "Saving…" : (isEdit ? "Save changes" : "Add product")),
     el("button", { class: "secondary-btn", type: "button", onclick: closeForm }, "Cancel")
@@ -520,13 +515,17 @@ function renderImagesGrid() {
     grid.append(slot);
   });
   const addBtn = $("#f-add-images");
-  if (addBtn) addBtn.disabled = formImages.length >= 3;
+  if (addBtn) addBtn.disabled = formImages.length >= MAX_IMAGES;
 }
 
 function onImagesPicked(e) {
   const files = [...(e.target.files || [])];
-  const room = 3 - formImages.length;
+  const room = MAX_IMAGES - formImages.length;
   for (const f of files.slice(0, Math.max(0, room))) {
+    if (f.size > MAX_IMAGE_BYTES) {
+      toast(`“${f.name}” is too large — please use an image under 4 MB.`, true);
+      continue;
+    }
     formImages.push({ which: "new", file: f, oldIndex: null, tempUrl: URL.createObjectURL(f) });
   }
   e.target.value = "";
@@ -556,29 +555,32 @@ async function compressImage(file, maxDim = 1200, quality = 0.78) {
 }
 
 async function uploadProductImage(productId, index, blob) {
-  const path = `products/${productId}/image-${index}.jpg`;
-  const storageRef = ref(storage, path);
-  await uploadBytes(storageRef, blob, { contentType: "image/jpeg" });
-  return await getDownloadURL(storageRef);
+  const imgPath = `products/${productId}/image-${index}.jpg`;
+  const { error } = await supabase.storage.from(BUCKET).upload(imgPath, blob, { contentType: "image/jpeg", upsert: true });
+  if (error) throw new Error("Image upload failed: " + (error.message || "unknown error"));
+  const { data } = supabase.storage.from(BUCKET).getPublicUrl(imgPath);
+  return data.publicUrl;
 }
 
-async function submitProductForm() {
-  if (saving) return;
-  // gather + validate
+function validateForm() {
   const name = ($("#f-name")?.value || "").trim();
   const pricePKR = Number($("#f-price")?.value || 0);
   const desc = ($("#f-desc")?.value || "").trim();
   const active = $("#f-active")?.checked !== false;
+  if (name.length < 2 || name.length > 120) return { error: "Please enter a name (2–120 chars)." };
+  if (!Number.isFinite(pricePKR) || pricePKR <= 0 || pricePKR > MAX_PRICE) return { error: "Please enter a valid price in PKR (greater than 0)." };
+  if (desc.length < 2 || desc.length > 1000) return { error: "Please enter a description (2–1000 chars)." };
+  if (formImages.length < MIN_IMAGES) return { error: `Add at least ${MIN_IMAGES} images (max ${MAX_IMAGES}).` };
+  if (formImages.length > MAX_IMAGES) return { error: `Too many images — pick at most ${MAX_IMAGES}.` };
+  return { name, pricePKR, desc, active };
+}
+
+async function submitProductForm() {
+  if (saving) return;
+  const v = validateForm();
+  if (v.error) { toast(v.error, true); return; }
+  const { name, pricePKR, desc, active } = v;
   const isEdit = !!editingId;
-
-  if (name.length < 2 || name.length > 120) { toast("Please enter a name (2–120 chars).", true); return; }
-  if (!Number.isFinite(pricePKR) || pricePKR <= 0 || pricePKR > 10_000_000) { toast("Please enter a valid price in PKR (greater than 0).", true); return; }
-  if (desc.length < 2 || desc.length > 1000) { toast("Please enter a description (2–1000 chars).", true); return; }
-  if (formImages.length < 2) { toast("Add at least 2 images (max 3).", true); return; }
-  if (formImages.length > 3) { toast("Too many images — pick at most 3.", true); return; }
-
-  const priceCents = Math.round(pricePKR * 100);
-  if (priceCents < 1 || priceCents > 100_000_000) { toast("Price is out of the valid range.", true); return; }
 
   formDraft = { name, pricePKR, desc, active };
   saving = true;
@@ -586,12 +588,12 @@ async function submitProductForm() {
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
 
   try {
-    const productId = editingId || doc(collection(db, "products")).id;
+    const productId = editingId || crypto.randomUUID();
 
     // upload only the new images; kept images keep their existing URLs
     const kept = formImages.filter((i) => i.which === "kept");
     const occupied = new Set(kept.map((i) => i.oldIndex));
-    const uploadedNew = new Set();   // slot indices newly uploaded (not to be deleted later)
+    const uploadedNew = new Set();   // slot indices newly uploaded (not deleted later)
     let newIndex = 0;
     const imageUrls = [];
     for (const img of formImages) {
@@ -608,110 +610,64 @@ async function submitProductForm() {
       newIndex++;
     }
 
+    const row = {
+      name,
+      price: Math.round(pricePKR * 100) / 100,
+      description: desc,
+      images: imageUrls,
+      in_stock: active,
+    };
+
     if (editingId) {
-      const existing = products.find((x) => x.id === editingId);
-      await updateDoc(doc(db, "products", editingId), {
-        title: name,
-        description: desc,
-        priceCents,
-        active,
-        images: imageUrls,
-        updatedAt: serverTimestamp(),
-      });
-      toast(`“${existing?.title || name}” updated.`);
+      const { error } = await supabase.from("products").update(row).eq("id", editingId);
+      if (error) throw new Error(error.message || "Failed to update the product.");
+      toast(`“${products.find((x) => x.id === editingId)?.name || name}” updated.`);
       // best-effort delete of removed old images (skip any path taken by a fresh upload)
       for (const i of removedIndexes) {
         if (uploadedNew.has(i)) continue;
-        try { await deleteObject(ref(storage, `products/${productId}/image-${i}.jpg`)); } catch {}
+        try {
+          const imgPath = `products/${productId}/image-${i}.jpg`;
+          await supabase.storage.from(BUCKET).remove([imgPath]);
+        } catch {}
       }
     } else {
-      await setDoc(doc(db, "products", productId), {
-        title: name,
-        description: desc,
-        category: "Electronics",
-        priceCents,
-        stockCount: 10,
-        active,
-        featured: false,
-        images: imageUrls,
-        createdBy: authUser.uid,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      const { error } = await supabase.from("products").insert({ id: productId, ...row });
+      if (error) throw new Error(error.message || "Failed to add the product.");
       toast(`“${name}” added — it appears on the storefront now.`);
     }
 
     closeForm();
+    await loadProducts();
   } catch (e) {
     console.error(e);
     saving = false;
-    const msg = e?.code === "storage/unauthorized" || e?.code === "storage/object-not-found"
-      ? "Image upload failed — has Storage been published in the Firebase Console?"
-      : (e?.code || "").toLowerCase().includes("permission")
-        ? "Save failed — Firestore rules may not be deployed yet."
-        : "Save failed. Please try again.";
+    const msg = e?.message || "Save failed. Please try again.";
     toast(msg, true);
-    saving = false;
     const b = $("#f-save");
     if (b) { b.disabled = false; b.textContent = editingId ? "Save changes" : "Add product"; }
   }
 }
 
 async function handleDelete(p) {
-  if (!confirm(`Delete "${p.title}"? This cannot be undone.`)) return;
-  const images = Array.isArray(p.images) ? p.images : [];
+  if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return;
+  const images = Array.isArray(p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
   try {
-    await deleteDoc(doc(db, "products", p.id));
-    toast(`“${p.title}” deleted.`);
+    const { error } = await supabase.from("products").delete().eq("id", p.id);
+    if (error) throw new Error(error.message || "Delete failed.");
+    toast(`“${p.name}” deleted.`);
     closeForm();
-    for (let i = 0; i < images.length; i++) {
-      try { await deleteObject(ref(storage, `products/${p.id}/image-${i}.jpg`)); } catch {}
+    // best-effort delete of the product's images
+    for (const url of images) {
+      try {
+        const imgPath = pathFromUrl(url);
+        if (imgPath) await supabase.storage.from(BUCKET).remove([imgPath]);
+      } catch {}
     }
+    await loadProducts();
   } catch (e) {
     console.error(e);
-    toast("Delete failed — Firestore rules may not be deployed yet.", true);
+    toast(e?.message || "Delete failed.", true);
   }
-  render();
-}
-
-/* ---------- Orders tab ---------- */
-function ordersTab(revenueCents, pendingCount, productsCount, stockTotal) {
-  const wrap = el("div", {});
-  wrap.append(el("div", { class: "section-title" },
-    el("h2", { text: "Orders" }),
-    el("span", { class: "hint", style: "color:var(--muted);font-size:.8rem", text: `${orders.length} total · ${fmtMoney(revenueCents)} revenue · ${stockTotal} units in stock` })
-  ));
-
-  if (ordersError) {
-    wrap.append(el("div", { class: "empty" }, el("h3", { text: "Orders unavailable" }), el("p", { text: ordersError })));
-    return wrap;
-  }
-  if (!ordersReady) {
-    for (let i = 0; i < 3; i++) wrap.append(el("div", { class: "skel skel-row" }));
-    return wrap;
-  }
-  if (orders.length === 0) {
-    wrap.append(el("div", { class: "empty" }, el("h3", { text: "No orders yet" }), el("p", { text: "Orders placed on the storefront appear here in real time." })));
-    return wrap;
-  }
-
-  for (const o of orders) {
-    const items = Array.isArray(o.items) ? o.items : [];
-    const itemText = items.map((i) => `${i.title} ×${i.quantity}`).join(" · ") || "—";
-    const card = el("div", { class: "order-card2" });
-    card.append(el("div", { class: "top" },
-      el("span", { class: "oid", text: `#${o.id.slice(0, 6).toUpperCase()}` }),
-      el("span", { class: "date", text: fmtDate(o.createdAt) }),
-      el("span", { class: "amt", text: fmtMoney(o.totalCents || 0) })
-    ));
-    card.append(el("div", { class: "meta", text: `${o.customerName || "—"} · ${o.customerEmail || "—"} · ${o.paymentMethod || "—"}` }));
-    card.append(el("div", { class: "meta", style: "font-size:.8rem", text: itemText }));
-
-    const pill = el("div", { style: "margin-top:8px; font-size:.8rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.08em", text: (o.status || "PENDING") });
-    card.append(pill);
-    wrap.append(card);
-  }
-  return wrap;
 }
 
 /* ---------- Boot ---------- */
