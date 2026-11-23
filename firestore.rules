@@ -56,10 +56,17 @@ service cloud.firestore {
              data.category in ['Electronics', 'Fashion', 'Home', 'Accessories'] &&
              data.priceCents is int && data.priceCents >= 1 && data.priceCents <= 100000000 &&
              data.stockCount is int && data.stockCount >= 0 && data.stockCount <= 100000 &&
-             data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 500 &&
              data.active is bool &&
              data.featured is bool &&
-             data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128;
+             data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
+             (!('imageKey' in data) || (data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 500));
+    }
+
+    function isValidImages(data) {
+      return data.images is list && data.images.size() >= 2 && data.images.size() <= 3 &&
+             data.images[0] is string && data.images[0].size() >= 1 && data.images[0].size() <= 1000 &&
+             data.images[1] is string && data.images[1].size() >= 1 && data.images[1].size() <= 1000 &&
+             (data.images.size() < 3 || (data.images[2] is string && data.images[2].size() >= 1 && data.images[2].size() <= 1000));
     }
 
     function isValidCartItem(data) {
@@ -172,21 +179,23 @@ service cloud.firestore {
       allow create: if isAdmin() &&
                        isValidId(productId) &&
                        incoming().createdBy == request.auth.uid &&
-                       incoming().keys().hasAll(['title', 'description', 'category', 'priceCents', 'stockCount', 'imageKey', 'active', 'featured', 'createdBy', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['title', 'description', 'category', 'priceCents', 'stockCount', 'imageKey', 'active', 'featured', 'createdBy', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasAll(['title', 'description', 'category', 'priceCents', 'stockCount', 'images', 'active', 'featured', 'createdBy', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['title', 'description', 'category', 'priceCents', 'stockCount', 'images', 'imageKey', 'active', 'featured', 'createdBy', 'createdAt', 'updatedAt']) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidProduct(incoming());
+                       isValidProduct(incoming()) &&
+                       isValidImages(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(productId) &&
                        isValidProduct(incoming()) &&
+                       (!('images' in incoming()) || isValidImages(incoming())) &&
                        incoming().createdBy == existing().createdBy &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
                          (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'priceCents', 'stockCount', 'imageKey', 'active', 'featured', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'priceCents', 'stockCount', 'imageKey', 'images', 'active', 'featured', 'updatedAt'])) ||
                          (existing().active == true &&
                           incoming().stockCount >= 0 &&
                           incoming().stockCount < existing().stockCount &&
