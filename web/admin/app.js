@@ -66,6 +66,7 @@ let formImages = [];           // [{ which: "kept"|"new", url?, file?, oldIndex?
 let removedIndexes = [];       // old indexes of kept images the user removed
 let saving = false;
 let pendingDelete = null;      // product id being deleted (for confirm)
+let formDraft = null;          // { name, pricePKR, desc, active } — survives re-renders
 
 let unsubscribers = [];
 
@@ -433,6 +434,7 @@ function openForm(id) {
 }
 
 function closeForm() {
+  formDraft = null;
   viewMode = "list";
   editingId = null;
   for (const img of formImages) {
@@ -451,17 +453,18 @@ function productForm() {
   sheet.append(el("h3", { text: isEdit ? "Edit product" : "Add product" }));
 
   // basic fields
+  const d = formDraft;
   const nameField = el("div", { class: "field" },
     el("label", { text: "Name", for: "f-name" }),
-    el("input", { id: "f-name", type: "text", value: isEdit ? p.title : "", placeholder: "e.g. Obsidian ANC Headphones", maxlength: "120", required: "" })
+    el("input", { id: "f-name", type: "text", value: d ? d.name : (isEdit ? p.title : ""), placeholder: "e.g. Obsidian ANC Headphones", maxlength: "120", required: "" })
   );
   const priceField = el("div", { class: "field" },
     el("label", { text: "Price (PKR)", for: "f-price" }),
-    el("input", { id: "f-price", type: "number", min: "1", step: "1", value: isEdit ? Math.round((p.priceCents || 0) / 100) : "", placeholder: "1500", required: "" })
+    el("input", { id: "f-price", type: "number", min: "1", step: "1", value: d ? d.pricePKR : (isEdit ? Math.round((p.priceCents || 0) / 100) : ""), placeholder: "1500", required: "" })
   );
   const stockField = el("div", { class: "field" },
     el("label", { class: "toggle-label", style: "display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:0.92rem;font-weight:700;color:var(--ink);text-transform:none;letter-spacing:0" },
-      el("input", { type: "checkbox", id: "f-active", checked: isEdit ? p.active !== false : true }),
+      el("input", { type: "checkbox", id: "f-active", checked: d ? d.active : (isEdit ? p.active !== false : true) }),
       "In stock (visible on storefront)"
     )
   );
@@ -470,9 +473,7 @@ function productForm() {
     el("label", { text: "Description", for: "f-desc" }),
     el("textarea", { id: "f-desc", rows: "3", maxlength: "1000", placeholder: "Describe the product…" })
   );
-  if (isEdit) {
-    descField.querySelector("textarea").value = p.description || "";
-  }
+  descField.querySelector("textarea").value = d ? d.desc : (isEdit ? (p.description || "") : "");
 
   const grid = el("div", { class: "form-grid" }, nameField, priceField, stockField, descField);
   sheet.append(grid);
@@ -579,8 +580,10 @@ async function submitProductForm() {
   const priceCents = Math.round(pricePKR * 100);
   if (priceCents < 1 || priceCents > 100_000_000) { toast("Price is out of the valid range.", true); return; }
 
+  formDraft = { name, pricePKR, desc, active };
   saving = true;
-  render();
+  const saveBtn = $("#f-save");
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
 
   try {
     const productId = editingId || doc(collection(db, "products")).id;
@@ -588,6 +591,7 @@ async function submitProductForm() {
     // upload only the new images; kept images keep their existing URLs
     const kept = formImages.filter((i) => i.which === "kept");
     const occupied = new Set(kept.map((i) => i.oldIndex));
+    const uploadedNew = new Set();   // slot indices newly uploaded (not to be deleted later)
     let newIndex = 0;
     const imageUrls = [];
     for (const img of formImages) {
@@ -599,6 +603,7 @@ async function submitProductForm() {
       const blob = await compressImage(img.file);
       const url = await uploadProductImage(productId, newIndex, blob);
       occupied.add(newIndex);
+      uploadedNew.add(newIndex);
       imageUrls.push(url);
       newIndex++;
     }
@@ -614,8 +619,9 @@ async function submitProductForm() {
         updatedAt: serverTimestamp(),
       });
       toast(`“${existing?.title || name}” updated.`);
-      // best-effort delete of removed old images
+      // best-effort delete of removed old images (skip any path taken by a fresh upload)
       for (const i of removedIndexes) {
+        if (uploadedNew.has(i)) continue;
         try { await deleteObject(ref(storage, `products/${productId}/image-${i}.jpg`)); } catch {}
       }
     } else {
@@ -645,7 +651,9 @@ async function submitProductForm() {
         ? "Save failed — Firestore rules may not be deployed yet."
         : "Save failed. Please try again.";
     toast(msg, true);
-    render();
+    saving = false;
+    const b = $("#f-save");
+    if (b) { b.disabled = false; b.textContent = editingId ? "Save changes" : "Add product"; }
   }
 }
 
