@@ -1,5 +1,5 @@
 /* ===== Bazaar storefront — Supabase public catalog ===== */
-/* ---------- Pure helpers (testable, no Firebase) ---------- */
+/* ---------- Pure helpers ---------- */
 import {
   WHATSAPP_PATH,
   fmtMoney,
@@ -15,7 +15,6 @@ import {
 /* ---------- Public catalog configuration (access controlled by Supabase policies) ---------- */
 const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
-const ADMIN_PATH = "admin/";
 const CART_KEY = "bazaar_cart_v1";
 const ORDERS_KEY = "bazaar_orders_v1";
 
@@ -98,11 +97,6 @@ const VIEWS = [
   { id: "support", label: "Support" },
 ];
 
-function isAdminHash() {
-  const parts = location.hash.replace(/^#\/?/, "").split("/");
-  return parts[0] === "admin" || (parts[0] === "shop" && parts[1] === "admin");
-}
-
 function currentRouteId() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
   const v = parts[0] || "shop";
@@ -166,7 +160,7 @@ async function refreshCatalog() {
   if (catalogRequestInFlight) return;
   catalogRequestInFlight = true;
   try {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/products?select=*&in_stock=eq.true&order=created_at.desc`, {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/products?select=*&order=created_at.desc`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
     });
     if (!response.ok) throw new Error(`Catalog request failed (${response.status})`);
@@ -331,7 +325,7 @@ function renderShop() {
       main.append(row);
     }
     const gridHead = el("div", { class: "section-head" },
-      el("div", {}, el("h2", { text: "All products" }), el("p", { class: "sub", text: `${all.length} item${all.length === 1 ? "" : "s"} in stock` }))
+      el("div", {}, el("h2", { text: "All products" }), el("p", { class: "sub", text: `${all.length} item${all.length === 1 ? "" : "s"}` }))
     );
     main.append(gridHead);
   }
@@ -598,21 +592,10 @@ function renderSupport() {
 }
 
 /* ---------- Boot ---------- */
-if (isAdminHash()) {
-  location.href = ADMIN_PATH;
-} else {
 startListeners();
-}
-
 window.addEventListener("hashchange", () => {
-  // Keep the suggested short form #/shop/admin and #/admin working by opening the admin page.
-  if (isAdminHash()) {
-    location.href = ADMIN_PATH;
-    return;
-  }
   galleryIndex = 0;
   currentRoute = currentRouteId();
   render();
 });
-
-if (!isAdminHash()) navigate(currentRouteId());
+navigate(currentRouteId());

@@ -1,4 +1,4 @@
-/* ===== Bazaar storefront — pure helpers (no Firebase imports; safe for tests) ===== */
+/* ===== Bazaar storefront — pure helpers ===== */
 
 export const WHATSAPP_NUMBER = "923221393770";
 export const WHATSAPP_SUPPORT_TEXT = "Hello, I need help with Bazaar.";

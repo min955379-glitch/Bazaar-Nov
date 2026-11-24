@@ -12,7 +12,7 @@ function loadApp(fields = {}) {
     getPublicUrl: (name) => ({ data: { publicUrl: `https://example.com/product-images/${name}` } }),
   };
   const source = fs.readFileSync(path.join(__dirname, '../web/admin/app.js'), 'utf8')
-    .replace('/* ---------- Boot ---------- */\nrender();\nloadProducts();', '')
+    .replace('/* ---------- Boot ---------- */\nrender();\nsupabase.auth.onAuthStateChange(onAuthStateChange);', '')
     + '\nthis.testing = { validateForm, pathFromUrl, uploadProductImage, setImages: value => { formImages = value; } };';
   const context = {
     window: { supabase: { createClient: () => ({ storage: { from: () => bucket } }) } },
