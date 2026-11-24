@@ -27,3 +27,29 @@ test('older products without a category default to Other', async () => {
   assert.equal(p.stockCount, 0);
   assert.equal(p.active, false);
 });
+
+test('mocked, not real: support links and no storefront admin references', async () => {
+  const vm = require('node:vm');
+  const website = path.join(__dirname, '../web/website');
+  const app = fs.readFileSync(path.join(website, 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(website, 'index.html'), 'utf8');
+  const h = await helpers();
+  const nodes = [];
+  const el = (tag, attrs = {}, ...children) => {
+    const node = { tag, attrs, children }; nodes.push(node); return node;
+  };
+  const render = app.slice(app.indexOf('function renderSupport()'), app.indexOf('/* ---------- Boot ---------- */'));
+  const constants = app.slice(app.indexOf('const SUPPORT_PHONE_DISPLAY'), app.indexOf('/* ---------- State'));
+  vm.runInNewContext(`${constants}\n${render}\nrenderSupport();`, {
+    el, path: () => ({}), WHATSAPP_PATH: '', whatsappSupportUrl: h.whatsappSupportUrl,
+    appMain: { append() {} },
+  });
+  assert(nodes.some(n => n.tag === 'a' && n.attrs.href === 'mailto:abdulmanan304000@gmail.com' && n.attrs.text === 'abdulmanan304000@gmail.com'));
+  assert(nodes.some(n => n.tag === 'a' && n.attrs.href === 'tel:03221393770' && n.attrs.text === '03221393770'));
+  assert(nodes.some(n => n.tag === 'a' && n.attrs.href === 'https://wa.me/923221393770'));
+  assert.match(html, /id="whatsapp-fab"/);
+  for (const name of fs.readdirSync(website)) {
+    const file = path.join(website, name);
+    if (fs.statSync(file).isFile()) assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /admin/i);
+  }
+});

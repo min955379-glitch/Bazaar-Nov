@@ -70,7 +70,7 @@ export function whatsappOrderUrl(cart) {
 }
 
 export function whatsappSupportUrl() {
-  return whatsappUrl(WHATSAPP_SUPPORT_TEXT);
+  return `https://wa.me/${WHATSAPP_NUMBER}`;
 }
 
 export function whatsappFloatUrl() {
