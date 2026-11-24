@@ -1,6 +1,6 @@
 /* ===== Bazaar public catalog management (no authentication) ===== */
 
-/* ---------- Config (public only — RLS enforces the real access control) ---------- */
+/* ---------- Config (public credentials; public write policies make editing open to everyone) ---------- */
 const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
 const BUCKET = "product-images";
@@ -20,10 +20,9 @@ let productsError = null;
 let viewMode = "list";          // list | form
 let editingId = null;          // id when editing (null = add)
 let formImages = [];           // [{ which, url?, file?, oldIndex?, tempUrl? }]
-let removedIndexes = [];       // old indexes of kept images the user removed
+let removedUrls = [];          // URLs of images removed while editing
 let saving = false;
 let formDraft = null;          // { name, pricePKR, desc, active } — survives re-renders
-let deletePending = null;
 
 /* ---------- Helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -96,20 +95,20 @@ async function loadProducts() {
   productsReady = false;
   productsError = null;
   render();
-  const { data, error } = await supabase
-    .from("products")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) {
+  try {
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    products = (data || []).filter((p) => p && typeof p.name === "string");
+  } catch (error) {
     console.error(error);
     productsError = error.message || "Could not load products.";
+  } finally {
     productsReady = true;
     render();
-    return;
   }
-  products = (data || []).filter((p) => p && typeof p.name === "string");
-  productsReady = true;
-  render();
 }
 
 /* ---------- Rendering ---------- */
@@ -136,7 +135,7 @@ function dashboardView() {
   const head = el("div", { class: "dash-head" },
     el("div", {},
       el("h1", { text: "Admin panel" }),
-      el("p", { text: "Manage the catalog — changes appear on the storefront automatically." })
+      el("p", { text: "Manage the catalog. This page and its editing controls are public." })
     )
   );
 
@@ -176,7 +175,7 @@ function productsTab() {
   if (products.length === 0) {
     wrap.append(el("div", { class: "empty" },
       el("h3", { text: "No products yet" }),
-      el("p", { text: "Products added here appear on the live storefront automatically. Use “Add product” to create the first one." })
+      el("p", { text: "Use “Add product” to create the first one." })
     ));
     return wrap;
   }
@@ -210,11 +209,11 @@ function productRow(p) {
 function openForm(id) {
   editingId = id;
   viewMode = "form";
-  removedIndexes = [];
+  removedUrls = [];
   if (id) {
     const p = products.find((x) => x.id === id);
     const kept = Array.isArray(p && p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
-    formImages = kept.map((url, i) => ({ which: "kept", url, oldIndex: i }));
+    formImages = kept.map((url) => ({ which: "kept", url }));
   } else {
     formImages = [];
   }
@@ -230,7 +229,7 @@ function closeForm() {
     if (img.which === "new" && img.tempUrl) URL.revokeObjectURL(img.tempUrl);
   }
   formImages = [];
-  removedIndexes = [];
+  removedUrls = [];
   saving = false;
   render();
 }
@@ -325,7 +324,7 @@ function onImagesPicked(e) {
 
 function removeImageAt(index) {
   const img = formImages[index];
-  if (img && img.which === "kept") removedIndexes.push(img.oldIndex);
+  if (img && img.which === "kept") removedUrls.push(img.url);
   if (img && img.which === "new" && img.tempUrl) URL.revokeObjectURL(img.tempUrl);
   formImages.splice(index, 1);
   renderImagesGrid();
@@ -345,12 +344,12 @@ async function compressImage(file, maxDim = 1200, quality = 0.78) {
   );
 }
 
-async function uploadProductImage(productId, index, blob) {
-  const imgPath = `products/${productId}/image-${index}.jpg`;
+async function uploadProductImage(productId, blob) {
+  const imgPath = `products/${productId}/${crypto.randomUUID()}.jpg`;
   const { error } = await supabase.storage.from(BUCKET).upload(imgPath, blob, { contentType: "image/jpeg", upsert: true });
   if (error) throw new Error("Image upload failed: " + (error.message || "unknown error"));
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(imgPath);
-  return data.publicUrl;
+  return { url: data.publicUrl, path: imgPath };
 }
 
 function validateForm() {
@@ -371,34 +370,28 @@ async function submitProductForm() {
   const v = validateForm();
   if (v.error) { toast(v.error, true); return; }
   const { name, pricePKR, desc, active } = v;
-  const isEdit = !!editingId;
 
   formDraft = { name, pricePKR, desc, active };
   saving = true;
   const saveBtn = $("#f-save");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
 
+  const uploadedPaths = [];
+  let saved = false;
   try {
     const productId = editingId || crypto.randomUUID();
 
-    // upload only the new images; kept images keep their existing URLs
-    const kept = formImages.filter((i) => i.which === "kept");
-    const occupied = new Set(kept.map((i) => i.oldIndex));
-    const uploadedNew = new Set();   // slot indices newly uploaded (not deleted later)
-    let newIndex = 0;
+    // Unique names avoid overwriting existing images before the product save succeeds.
     const imageUrls = [];
     for (const img of formImages) {
       if (img.which === "kept") {
         imageUrls.push(img.url);
         continue;
       }
-      while (occupied.has(newIndex)) newIndex++;
       const blob = await compressImage(img.file);
-      const url = await uploadProductImage(productId, newIndex, blob);
-      occupied.add(newIndex);
-      uploadedNew.add(newIndex);
-      imageUrls.push(url);
-      newIndex++;
+      const uploaded = await uploadProductImage(productId, blob);
+      uploadedPaths.push(uploaded.path);
+      imageUrls.push(uploaded.url);
     }
 
     const row = {
@@ -410,26 +403,29 @@ async function submitProductForm() {
     };
 
     if (editingId) {
-      const { error } = await supabase.from("products").update(row).eq("id", editingId);
+      const { data, error } = await supabase.from("products").update(row).eq("id", editingId).select("id").maybeSingle();
       if (error) throw new Error(error.message || "Failed to update the product.");
-      toast(`“${products.find((x) => x.id === editingId)?.name || name}” updated.`);
-      // best-effort delete of removed old images (skip any path taken by a fresh upload)
-      for (const i of removedIndexes) {
-        if (uploadedNew.has(i)) continue;
-        try {
-          const imgPath = `products/${productId}/image-${i}.jpg`;
-          await supabase.storage.from(BUCKET).remove([imgPath]);
-        } catch {}
+      if (!data) throw new Error("Product could not be updated. Check access permissions.");
+      saved = true;
+      toast(`“${name}” updated.`);
+      const oldPaths = removedUrls.map(pathFromUrl).filter(Boolean);
+      if (oldPaths.length) {
+        const { error: cleanupError } = await supabase.storage.from(BUCKET).remove(oldPaths);
+        if (cleanupError) console.warn("Could not remove old images", cleanupError);
       }
     } else {
       const { error } = await supabase.from("products").insert({ id: productId, ...row });
       if (error) throw new Error(error.message || "Failed to add the product.");
-      toast(`“${name}” added — it appears on the storefront now.`);
+      saved = true;
+      toast(`“${name}” added.`);
     }
 
     closeForm();
     await loadProducts();
   } catch (e) {
+    if (!saved && uploadedPaths.length) {
+      try { await supabase.storage.from(BUCKET).remove(uploadedPaths); } catch (cleanupError) { console.warn(cleanupError); }
+    }
     console.error(e);
     saving = false;
     const msg = e?.message || "Save failed. Please try again.";
@@ -443,8 +439,9 @@ async function handleDelete(p) {
   if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return;
   const images = Array.isArray(p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
   try {
-    const { error } = await supabase.from("products").delete().eq("id", p.id);
+    const { data, error } = await supabase.from("products").delete().eq("id", p.id).select("id").maybeSingle();
     if (error) throw new Error(error.message || "Delete failed.");
+    if (!data) throw new Error("Product could not be deleted. Check access permissions.");
     toast(`“${p.name}” deleted.`);
     closeForm();
     // best-effort delete of the product's images
