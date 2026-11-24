@@ -41,7 +41,7 @@ test('mocked, not real: token refresh leaves open product draft intact', async (
 test('mocked, not real: validation keeps draft open when too few images', async () => {
   const a = setup(); a.auth('INITIAL_SESSION', { user: { id: 'admin', email: 'abdulmanan@bazaarshop.app' } }); await flush(); a.elements.add.onclick();
   a.elements.name.value = 'Draft product'; await a.elements['product-form'].handlers.submit({ preventDefault() {} });
-  assert.equal(a.elements['product-form'].hidden, false); assert.match(a.elements['form-error'].textContent, /2 or 3/); assert.equal(a.elements.name.value, 'Draft product');
+  assert.equal(a.elements['product-form'].hidden, false); assert.match(a.elements['form-error'].textContent, /1 to 3/); assert.equal(a.elements.name.value, 'Draft product');
 });
 
 test('mocked, not real: retry uses same product id and handles saved duplicate', async () => {
@@ -120,4 +120,31 @@ test('mocked, not real: mobile and desktop copies use exclusive CSS visibility',
   assert.match(css,/@media\(max-width:767px\)/);
   assert.match(css,/\.header-actions \.desktop-website\{display:none\}/);
   assert.match(css,/\.dash-actions \.mobile-website,#editor-website \.mobile-website\{display:inline-flex\}/);
+});
+
+test('mocked, not real: 0 and 4 images fail; 1, 2 and 3 images save with category', async () => {
+  for (const count of [0, 1, 2, 3, 4]) {
+    const a = setup(); let payload;
+    a.auth('INITIAL_SESSION', { user: { id: 'admin', email: 'abdulmanan@bazaarshop.app' } }); await flush();
+    a.elements.add.onclick(); assert.equal(a.elements.category.value, 'Other');
+    a.elements.name.value = 'Example'; a.elements.price.value = '300'; a.elements.description.value = 'Example'; a.elements.category.value = 'Fashion';
+    vm.runInNewContext(`photos = Array.from({length:${count}}, (_,i) => ({url:'https://example.com/'+i, preview:'https://example.com/'+i}))`, a.context);
+    a.client.from = () => ({ insert(p) { payload = p; return this; }, select() { return this; }, single() { return Promise.resolve({error:null}); }, order() { return Promise.resolve({data:[],error:null}); } });
+    await a.elements['product-form'].handlers.submit({preventDefault(){}});
+    if (count === 0 || count === 4) { assert.equal(payload, undefined); assert.match(a.elements['form-error'].textContent, /1 to 3/); }
+    else { assert.equal(payload.images.length, count); assert.equal(payload.category, 'Fashion'); assert.equal(a.elements['product-form'].hidden, true); }
+  }
+});
+
+test('mocked, not real: exact category choices and saved category survives a failed edit', async () => {
+  const html = fs.readFileSync(path.join(__dirname,'../web/admin/index.html'),'utf8');
+  const select = html.match(/<select id="category"[^>]*>([\s\S]*?)<\/select>/)[1];
+  assert.deepEqual([...select.matchAll(/value="([^"]+)"/g)].map(m=>m[1]), ['Other','Electronics','Fashion','Home','Accessories']);
+  const a=setup(); a.auth('INITIAL_SESSION',{user:{id:'admin',email:'abdulmanan@bazaarshop.app'}}); await flush();
+  vm.runInNewContext("openForm({id:'edit',name:'Example',price:300,description:'Example',category:'Home',images:['https://example.com/1'],in_stock:true})",a.context);
+  assert.equal(a.elements.category.value,'Home');
+  a.elements.category.value='Accessories'; let payload;
+  a.client.from=()=>({update(p){payload=p;return this;},eq(){return this;},select(){return this;},single(){return Promise.resolve({error:{message:'offline'}})}});
+  await a.elements['product-form'].handlers.submit({preventDefault(){}});
+  assert.equal(payload.category,'Accessories'); assert.equal(a.elements.category.value,'Accessories'); assert.equal(a.elements['product-form'].hidden,false);
 });

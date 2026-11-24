@@ -7,6 +7,7 @@ const $ = id => document.getElementById(id);
 $('view-website').href = WEBSITE_URL;
 $('mobile-view-website').href = WEBSITE_URL;
 const lock = createLockout();
+const MIN_IMAGES = 1, MAX_IMAGES = 3;
 const MAX_SIZE = 4 * 1024 * 1024;
 const ADMIN = 'abdulmanan@bazaarshop.app';
 let activeUser = null, initialized = false, signingIn = false, busy = false;
@@ -79,7 +80,7 @@ async function loadProducts() {
   $('list-message').textContent = 'Loading products…'; $('retry').hidden = true;
   for (const id of ['total-count', 'stock-count', 'out-count']) $(id).textContent = '–'; $('product-list').replaceChildren();
   try {
-    const { data, error } = await withTimeout(client.from('products').select('id,name,price,description,images,in_stock,created_at').order('created_at', { ascending: false }), 'Loading');
+    const { data, error } = await withTimeout(client.from('products').select('id,name,price,description,category,images,in_stock,created_at').order('created_at', { ascending: false }), 'Loading');
     if (error) throw error;
     products = data || []; showProducts();
     $('list-message').textContent = products.length ? '' : 'No products yet. Tap Add product.';
@@ -95,7 +96,7 @@ function showProducts() {
   for (const product of products) {
     const row = node('article', null, 'product-row');
     if (product.images?.[0]) { const img = node('img'); img.src = product.images[0]; img.alt = ''; row.append(img); }
-    const info = node('div', null, 'info'); info.append(node('strong', product.name), node('div', `Rs ${Number(product.price).toLocaleString('en-PK')} · ${product.in_stock === false ? 'Out of stock' : 'In stock'}`, 'meta'));
+    const info = node('div', null, 'info'); info.append(node('strong', product.name), node('div', `${product.category || 'Other'} · Rs ${Number(product.price).toLocaleString('en-PK')} · ${product.in_stock === false ? 'Out of stock' : 'In stock'}`, 'meta'));
     const actions = node('div', null, 'actions');
     const edit = node('button', 'Edit', 'secondary-btn'); edit.type = 'button'; edit.onclick = () => openForm(product);
     const del = node('button', 'Delete', 'secondary-btn'); del.type = 'button'; del.onclick = () => deleteProduct(product, del);
@@ -110,6 +111,7 @@ function openForm(product = null) {
   clearPhotos(); editing = product; draftId = product ? null : crypto.randomUUID();
   $('product-form').reset(); $('form-title').textContent = product ? 'Edit product' : 'Add product';
   $('name').value = product?.name || ''; $('price').value = product?.price ?? ''; $('description').value = product?.description || '';
+  $('category').value = product?.category || 'Other';
   $('in-stock').checked = product ? product.in_stock !== false : true;
   originalImages = [...(product?.images || [])]; photos = originalImages.map(url => ({ url, preview: url }));
   $('form-error').textContent = ''; $('list-view').hidden = true; $('product-form').hidden = false; showPhotos(); $('name').focus();
@@ -118,7 +120,7 @@ $('add').onclick = () => openForm();
 $('cancel').onclick = () => { if (busy) return; if (confirm('Discard this draft?')) { clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; $('dash-actions').append($('mobile-view-website')); } };
 $('photos').addEventListener('change', event => {
   const files = [...event.target.files]; event.target.value = '';
-  if (photos.length + files.length > 3) { $('form-error').textContent = 'Choose no more than 3 photos.'; return; }
+  if (photos.length + files.length > MAX_IMAGES) { $('form-error').textContent = 'Choose no more than 3 photos.'; return; }
   for (const file of files) {
     if (!file.type.startsWith('image/')) { $('form-error').textContent = 'Please choose image files only.'; continue; }
     photos.push({ file, preview: URL.createObjectURL(file) });
@@ -126,6 +128,8 @@ $('photos').addEventListener('change', event => {
   showPhotos();
 });
 function showPhotos() {
+  $('photos-label').textContent = `Images (${photos.length}/${MAX_IMAGES}) — 1 to 3 required`;
+  $('photos').disabled = busy || photos.length >= MAX_IMAGES;
   const list = $('image-list'); list.replaceChildren();
   photos.forEach((photo, index) => {
     const wrapper = node('div', null, 'image-slot'), img = node('img'); img.src = photo.preview; img.alt = `Photo ${index + 1}`;
@@ -166,7 +170,7 @@ function setBusy(value) {
 }
 $('product-form').addEventListener('submit', async event => {
   event.preventDefault(); if (busy) return;
-  if (photos.length < 2 || photos.length > 3) { $('form-error').textContent = 'Choose 2 or 3 images.'; return; }
+  if (photos.length < MIN_IMAGES || photos.length > MAX_IMAGES) { $('form-error').textContent = 'Choose 1 to 3 images.'; return; }
   const price = Number($('price').value), name = $('name').value.trim(), description = $('description').value.trim();
   if (name.length < 2 || !description || !Number.isFinite(price) || price <= 0 || price > 10000000) { $('form-error').textContent = 'Enter a valid name, description and price.'; return; }
   setBusy(true); $('form-error').textContent = ''; let uploaded = [], saved = false;
@@ -182,7 +186,7 @@ $('product-form').addEventListener('submit', async event => {
       // does not upload a second copy of the same photo.
       photo.url = data.publicUrl; uploaded.push(data.publicUrl); urls.push(data.publicUrl);
     }
-    const payload = { name, price, description, images: urls, in_stock: $('in-stock').checked };
+    const payload = { name, price, description, category: $('category').value, images: urls, in_stock: $('in-stock').checked };
     const operation = editing ? client.from('products').update(payload).eq('id', editing.id).select('id').single() : client.from('products').insert({ id: draftId, ...payload }).select('id').single();
     const { error } = await withTimeout(operation, 'Saving');
     let alreadySaved = false;
