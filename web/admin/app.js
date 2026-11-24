@@ -1,6 +1,6 @@
-/* ===== Bazaar public catalog management (no authentication) ===== */
+/* ===== Bazaar admin portal — Supabase Auth and catalog ===== */
 
-/* ---------- Config (public credentials; public write policies make editing open to everyone) ---------- */
+/* ---------- Public client configuration; write access is enforced by RLS ---------- */
 const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
 const BUCKET = "product-images";
@@ -8,12 +8,15 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;   // safety net: reject huge uploads be
 const MIN_IMAGES = 2;
 const MAX_IMAGES = 3;
 const MAX_PRICE = 10_000_000;
+const CATEGORIES = ["Electronics", "Fashion", "Home", "Accessories", "Other"];
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-});
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const ADMIN_EMAIL = "abdulmanan@bazaarshop.app";
 
 /* ---------- State ---------- */
+let adminStatus = "loading";
+let authError = "";
+let authBusy = false;
 let products = [];
 let productsReady = false;
 let productsError = null;
@@ -114,8 +117,72 @@ async function loadProducts() {
 /* ---------- Rendering ---------- */
 function render() {
   appMain.innerHTML = "";
+  if (adminStatus !== "signed-in") {
+    appMain.append(gateView());
+    return;
+  }
   appMain.append(dashboardView());
   if (viewMode === "form") renderImagesGrid();
+}
+
+function gateView() {
+  const form = el("form", { class: "gate-form", onsubmit: handleSignIn },
+    el("p", { class: "sub", text: "Sign in with your username and password to manage the catalog." }),
+    el("div", { class: "field" }, el("label", { for: "f-username", text: "Username" }),
+      el("input", { id: "f-username", type: "text", autocomplete: "username", required: "", autocapitalize: "none" })),
+    el("div", { class: "field" }, el("label", { for: "f-password", text: "Password" }),
+      el("input", { id: "f-password", type: "password", autocomplete: "current-password", required: "" })),
+    authError ? el("p", { class: "gate-err show", role: "alert", text: authError }) : null,
+    el("button", { class: "primary-btn wide", type: "submit", disabled: authBusy || adminStatus === "loading" },
+      adminStatus === "loading" ? "Checking session…" : authBusy ? "Signing in…" : "Sign in")
+  );
+  return el("div", { class: "gate-wrap" }, el("div", { class: "gate-card" },
+    el("div", { class: "content" }, el("h1", { text: "Sign in to manage Bazaar" }), form)));
+}
+
+async function handleSignIn(event) {
+  event.preventDefault();
+  if (authBusy) return;
+  const username = ($("#f-username")?.value || "").trim().toLowerCase();
+  const password = $("#f-password")?.value || "";
+  if (!username || !password) { authError = "Enter your username and password."; render(); return; }
+  authBusy = true;
+  authError = "";
+  render();
+  try {
+    const { error } = await supabase.auth.signInWithPassword({ email: `${username}@bazaarshop.app`, password });
+    if (error) throw error;
+  } catch (error) {
+    // Never display the password even if an upstream error unexpectedly echoes it.
+    const safe = value => String(value || "unknown").split(password).join("[redacted]");
+    authError = `Sign-in failed (${safe(error.code || error.name)}): ${safe(error.message)}`;
+  } finally {
+    authBusy = false;
+    render();
+  }
+}
+
+async function handleSignOut() {
+  const { error } = await supabase.auth.signOut();
+  if (error) toast(error.message || "Sign out failed.", true);
+}
+
+function onAuthStateChange(_event, session) {
+  const email = String(session?.user?.email || "").toLowerCase();
+  if (email === ADMIN_EMAIL) {
+    const wasSignedIn = adminStatus === "signed-in";
+    adminStatus = "signed-in";
+    authError = "";
+    render();
+    if (!wasSignedIn) setTimeout(loadProducts, 0);
+  } else {
+    adminStatus = "signed-out";
+    products = [];
+    productsReady = false;
+    viewMode = "list";
+    if (email) authError = "This account is not the Bazaar administrator.";
+    render();
+  }
 }
 
 /* ---------- Dashboard ---------- */
@@ -135,8 +202,9 @@ function dashboardView() {
   const head = el("div", { class: "dash-head" },
     el("div", {},
       el("h1", { text: "Admin panel" }),
-      el("p", { text: "Manage the catalog. This page and its editing controls are public." })
-    )
+      el("p", { text: "Manage the catalog securely." })
+    ),
+    el("button", { class: "secondary-btn", type: "button", onclick: handleSignOut, text: "Sign out" })
   );
 
   const content = el("div", {});
@@ -193,7 +261,7 @@ function productRow(p) {
   const meta = el("div", { class: "m" });
   meta.append(
     el("b", { text: fmtPKR(p.price) }),
-    el("span", { text: p.in_stock === false ? "Hidden" : "In stock" }),
+    el("span", { text: p.in_stock === false ? "Out of stock" : "In stock" }),
     el("span", { text: fmtDate(p.created_at) })
   );
   row.append(el("div", { class: "info" }, el("div", { class: "t", text: p.name }), meta));
@@ -249,10 +317,17 @@ function productForm() {
     el("label", { text: "Price (PKR)", for: "f-price" }),
     el("input", { id: "f-price", type: "number", min: "1", step: "1", value: d ? d.pricePKR : (isEdit ? Math.round(Number(p.price) || 0) : ""), placeholder: "1500", required: "" })
   );
+  const selectedCategory = d?.category || p?.category || "Other";
+  const categoryField = el("div", { class: "field" },
+    el("label", { text: "Category", for: "f-category" }),
+    el("select", { id: "f-category" }, ...CATEGORIES.map((category) =>
+      el("option", { value: category, selected: category === selectedCategory }, category)
+    ))
+  );
   const stockField = el("div", { class: "field" },
     el("label", { class: "toggle-label", style: "display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:0.92rem;font-weight:700;color:var(--ink);text-transform:none;letter-spacing:0" },
       el("input", { type: "checkbox", id: "f-active", checked: d ? d.active : (isEdit ? p.in_stock !== false : true) }),
-      "In stock (visible on storefront)"
+      "In stock (available to order)"
     )
   );
 
@@ -262,7 +337,7 @@ function productForm() {
   );
   descField.querySelector("textarea").value = d ? d.desc : (isEdit ? (p.description || "") : "");
 
-  const grid = el("div", { class: "form-grid" }, nameField, priceField, stockField, descField);
+  const grid = el("div", { class: "form-grid" }, nameField, priceField, categoryField, stockField, descField);
   sheet.append(grid);
 
   // images
@@ -357,21 +432,23 @@ function validateForm() {
   const pricePKR = Number($("#f-price")?.value || 0);
   const desc = ($("#f-desc")?.value || "").trim();
   const active = $("#f-active")?.checked !== false;
+  const category = $("#f-category")?.value || "Other";
+  if (!CATEGORIES.includes(category)) return { error: "Please select a valid category." };
   if (name.length < 2 || name.length > 120) return { error: "Please enter a name (2–120 chars)." };
   if (!Number.isFinite(pricePKR) || pricePKR <= 0 || pricePKR > MAX_PRICE) return { error: "Please enter a valid price in PKR (greater than 0)." };
   if (desc.length < 2 || desc.length > 1000) return { error: "Please enter a description (2–1000 chars)." };
   if (formImages.length < MIN_IMAGES) return { error: `Add at least ${MIN_IMAGES} images (max ${MAX_IMAGES}).` };
   if (formImages.length > MAX_IMAGES) return { error: `Too many images — pick at most ${MAX_IMAGES}.` };
-  return { name, pricePKR, desc, active };
+  return { name, pricePKR, desc, active, category };
 }
 
 async function submitProductForm() {
   if (saving) return;
   const v = validateForm();
   if (v.error) { toast(v.error, true); return; }
-  const { name, pricePKR, desc, active } = v;
+  const { name, pricePKR, desc, active, category } = v;
 
-  formDraft = { name, pricePKR, desc, active };
+  formDraft = { name, pricePKR, desc, active, category };
   saving = true;
   const saveBtn = $("#f-save");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
@@ -398,6 +475,7 @@ async function submitProductForm() {
       name,
       price: Math.round(pricePKR * 100) / 100,
       description: desc,
+      category,
       images: imageUrls,
       in_stock: active,
     };
@@ -460,4 +538,4 @@ async function handleDelete(p) {
 
 /* ---------- Boot ---------- */
 render();
-loadProducts();
+supabase.auth.onAuthStateChange(onAuthStateChange);

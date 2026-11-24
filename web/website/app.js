@@ -1,14 +1,5 @@
-/* ===== Bazaar storefront — vanilla JS + Firebase (no sign-in required) ===== */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getFirestore,
-  collection,
-  onSnapshot,
-  query,
-  where,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-/* ---------- Pure helpers (testable, no Firebase) ---------- */
+/* ===== Bazaar storefront — Supabase public catalog ===== */
+/* ---------- Pure helpers ---------- */
 import {
   WHATSAPP_PATH,
   fmtMoney,
@@ -18,18 +9,12 @@ import {
   whatsappOrderUrl,
   whatsappSupportUrl,
   matchFilters,
-  currentProducts as _currentProducts,
+  productFromSupabase,
 } from "./helpers.js";
 
-/* ---------- Config (client-side public config; security is enforced by Firestore rules) ---------- */
-const firebaseConfig = {
-  apiKey: "AIzaSyBwHTSlynCnwVaOuz4NBybOpC9Wzo8Pkp4",
-  authDomain: "gen-lang-client-0568023966.firebaseapp.com",
-  projectId: "gen-lang-client-0568023966",
-  storageBucket: "gen-lang-client-0568023966.firebasestorage.app",
-};
-const DATABASE_ID = "ai-studio-android-bazaar-ff6147c8-9c50-47a7-a4c0-4235cdb6b40e";
-const ADMIN_PATH = "admin/";
+/* ---------- Public catalog configuration (access controlled by Supabase policies) ---------- */
+const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
 const CART_KEY = "bazaar_cart_v1";
 const ORDERS_KEY = "bazaar_orders_v1";
 
@@ -39,12 +24,8 @@ const SUPPORT_PHONE_TEL = "+923221393770";
 const SUPPORT_EMAIL = "";                 // optional — paste a support email here to show it
 const SUPPORT_HOURS = "Sunday – Thursday: 9:00 AM – 5:00 PM"; // editable placeholder
 
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app, DATABASE_ID);
-
-/* ---------- State (cart + orders live on this device; catalog is live from Firestore) ---------- */
+/* ---------- State (cart and orders stay on this device) ---------- */
 let liveProducts = [];
-let liveCatalogFailed = false;
 let cart = loadJSON(CART_KEY, []);
 let orders = loadJSON(ORDERS_KEY, []);
 let productsReady = false;
@@ -52,22 +33,11 @@ let loadingError = null;
 let searchQuery = "";
 let selectedCategory = null;
 let currentRoute = "shop";
-let unsubscribers = [];
+let catalogRequestInFlight = false;
 let galleryIndex = 0;
 
-/* Demo catalog used only when the live Firestore catalog is unavailable (e.g. rules not deployed).
-   Clearly labelled in the UI as a demo. Amounts are unchanged; only the symbol/format changed to Rs. */
-const DEMO_CATALOG = [
-  { id: "starter_anc_headphones", title: "Obsidian ANC Studio Headphones", description: "Active noise-canceling wireless over-ear headphones with 40-hour battery, plush memory foam earcups, and lossless USB-C audio.", category: "Electronics", priceCents: 18900, stockCount: 18, imageKey: "electronics", active: true, featured: true },
-  { id: "starter_cognac_tote", title: "Artisan Cognac Leather Tote", description: "Hand-stitched full-grain vegetable-tanned leather tote with brass hardware and a padded 14-inch laptop sleeve.", category: "Fashion", priceCents: 14500, stockCount: 12, imageKey: "fashion", active: true, featured: true },
-  { id: "starter_sage_carafe", title: "Matte Sage Ceramic Pour-Over Set", description: "Stoneware coffee dripper and insulated serving carafe with natural oak collar for clean, aromatic morning brews.", category: "Home", priceCents: 6400, stockCount: 24, imageKey: "home", active: true, featured: true },
-  { id: "starter_titanium_watch", title: "Minimalist Titanium Smartwatch", description: "Sapphire crystal AMOLED display, 10-day endurance battery, heart-rate & sleep telemetry, and 5ATM water resistance.", category: "Electronics", priceCents: 22900, stockCount: 9, imageKey: "electronics", active: true, featured: false },
-  { id: "starter_tortoise_shades", title: "Heritage Tortoise Sunglasses", description: "Polarized UV400 green-tint mineral lenses set in hand-finished Italian acetate and brushed gold temples.", category: "Accessories", priceCents: 8800, stockCount: 15, imageKey: "fashion", active: true, featured: false },
-  { id: "starter_brass_lamp", title: "Arc Brushed Brass Desk Lamp", description: "Sculptural curved reading lamp in warm satin brass with stepless touch dimming and flicker-free warm LED.", category: "Home", priceCents: 11900, stockCount: 7, imageKey: "home", active: true, featured: false },
-];
-
 function currentProducts() {
-  return _currentProducts(liveProducts, liveCatalogFailed, DEMO_CATALOG);
+  return liveProducts;
 }
 
 /* ---------- Local persistence helpers ---------- */
@@ -127,11 +97,6 @@ const VIEWS = [
   { id: "support", label: "Support" },
 ];
 
-function isAdminHash() {
-  const parts = location.hash.replace(/^#\/?/, "").split("/");
-  return parts[0] === "admin" || (parts[0] === "shop" && parts[1] === "admin");
-}
-
 function currentRouteId() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
   const v = parts[0] || "shop";
@@ -190,32 +155,38 @@ function path(d) {
   return p;
 }
 
-/* ---------- Firestore catalog (read-only) ---------- */
-function clearListeners() {
-  unsubscribers.forEach((u) => { try { u(); } catch {} });
-  unsubscribers = [];
+/* ---------- Supabase catalog (read-only) ---------- */
+async function refreshCatalog() {
+  if (catalogRequestInFlight) return;
+  catalogRequestInFlight = true;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/products?select=*&order=created_at.desc`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    if (!response.ok) throw new Error(`Catalog request failed (${response.status})`);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error("Invalid catalog response");
+    const updated = rows.filter((row) => row && typeof row.name === "string").map(productFromSupabase);
+    const changed = JSON.stringify(updated) !== JSON.stringify(liveProducts) || !productsReady || loadingError;
+    liveProducts = updated;
+    productsReady = true;
+    loadingError = null;
+    if (changed) rerender();
+  } catch (error) {
+    console.error("Catalog unavailable:", error);
+    const changed = !productsReady || !loadingError;
+    productsReady = true;
+    loadingError = "The catalog is temporarily unavailable. Please try again.";
+    if (changed) rerender();
+  } finally {
+    catalogRequestInFlight = false;
+  }
 }
 
 function startListeners() {
-  clearListeners();
-  loadingError = null;
-  liveCatalogFailed = false;
-  liveProducts = [];
-  productsReady = false;
-
-  unsubscribers.push(onSnapshot(query(collection(db, "products"), where("active", "==", true)), (snap) => {
-    liveProducts = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .filter((p) => p && typeof p.title === "string")
-      .sort((a, b) => (b.featured === true) - (a.featured === true) || a.title.localeCompare(b.title));
-    productsReady = true;
-    rerender();
-  }, (err) => {
-    console.error(err);
-    loadingError = "Live catalog is unavailable. Showing the demo catalog.";
-    liveCatalogFailed = true;
-    productsReady = true;
-    rerender();
-  }));
+  refreshCatalog();
+  setInterval(() => { if (!document.hidden) refreshCatalog(); }, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshCatalog(); });
 }
 
 /* ---------- Actions ---------- */
@@ -294,7 +265,6 @@ function rerender() {
 /* ---------- Shop ---------- */
 function renderShop() {
   const products = currentProducts();
-  const hasDemo = liveCatalogFailed && liveProducts.length === 0;
   const main = appMain;
 
   const hero = el("div", { class: "hero" },
@@ -303,7 +273,7 @@ function renderShop() {
     el("div", { class: "hero-copy" },
       el("span", { class: "live" }, el("b"), "Live inventory"),
       el("h1", { text: "Crafted essentials, synced live." }),
-      el("p", { text: "Direct from cloud inventory — updated as soon as the store changes." })
+      el("p", { text: "Direct from cloud inventory — refreshed regularly as the store changes." })
     )
   );
   main.append(hero);
@@ -315,13 +285,13 @@ function renderShop() {
     el("button", { type: "button", text: "Clear", onclick: () => { searchQuery = ""; rerender(); } })
   );
   toolbar.append(search);
-  if (hasDemo) {
-    toolbar.append(el("span", { class: "demo-pill", text: "Demo catalog — live inventory unavailable" }));
+  if (loadingError) {
+    toolbar.append(el("span", { class: "demo-pill", text: loadingError }));
   }
   main.append(toolbar);
 
   const chips = el("div", { class: "chip-row" });
-  const categories = ["All", "Electronics", "Fashion", "Home", "Accessories"];
+  const categories = ["All", "Electronics", "Fashion", "Home", "Accessories", "Other"];
   for (const c of categories) {
     const isActive = (c === "All" && selectedCategory === null) || selectedCategory === c;
     chips.append(el("button", {
@@ -355,7 +325,7 @@ function renderShop() {
       main.append(row);
     }
     const gridHead = el("div", { class: "section-head" },
-      el("div", {}, el("h2", { text: "All products" }), el("p", { class: "sub", text: `${all.length} item${all.length === 1 ? "" : "s"} in stock` }))
+      el("div", {}, el("h2", { text: "All products" }), el("p", { class: "sub", text: `${all.length} item${all.length === 1 ? "" : "s"}` }))
     );
     main.append(gridHead);
   }
@@ -363,8 +333,8 @@ function renderShop() {
   const grid = el("div", { class: "product-grid" });
   if (all.length === 0) {
     grid.append(el("div", { class: "empty-state" },
-      el("h3", { text: searchQuery ? "Nothing matches that search" : "No products yet" }),
-      el("p", { text: searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store administrator will appear here in real time." })
+      el("h3", { text: loadingError ? "Catalog unavailable" : (searchQuery ? "Nothing matches that search" : "No products yet") }),
+      el("p", { text: loadingError || (searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store administrator will appear here.") })
     ));
   } else {
     for (const p of all) grid.append(productCard(p));
@@ -374,8 +344,13 @@ function renderShop() {
 
 function onSearchChange(e) {
   searchQuery = e.target.value;
-  const sw = e.target.closest(".search-wrap");
-  sw.classList.toggle("has-query", !!searchQuery);
+  const position = e.target.selectionStart;
+  rerender();
+  const input = $("#search-input");
+  if (input) {
+    input.focus();
+    if (position !== null) input.setSelectionRange(position, position);
+  }
 }
 
 function featuredCard(p) {
@@ -405,7 +380,7 @@ function productCard(p) {
     el("h3", { text: p.title, onclick: () => navigate("product", p.id) }),
     el("div", { class: "price-row" },
       el("span", { class: "price", text: fmtMoney(p.priceCents || 0) }),
-      el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : `${p.stockCount} left` })
+      el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : "In stock" })
     ),
     el("button", {
       class: "add-btn",
@@ -461,7 +436,7 @@ function renderProduct() {
     el("h1", { text: product.title }),
     el("div", { class: "price-row" },
       el("span", { class: "price", text: fmtMoney(product.priceCents || 0) }),
-      el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : `${product.stockCount} left` })
+      el("span", { class: "stock" + (outOfStock ? " out" : ""), text: outOfStock ? "Sold out" : "In stock" })
     ),
     el("p", { class: "desc", text: product.description || "" }),
     el("button", {
@@ -617,21 +592,10 @@ function renderSupport() {
 }
 
 /* ---------- Boot ---------- */
-if (isAdminHash()) {
-  location.href = ADMIN_PATH;
-} else {
 startListeners();
-}
-
 window.addEventListener("hashchange", () => {
-  // Keep the suggested short form #/shop/admin and #/admin working by opening the admin page.
-  if (isAdminHash()) {
-    location.href = ADMIN_PATH;
-    return;
-  }
   galleryIndex = 0;
   currentRoute = currentRouteId();
   render();
 });
-
-if (!isAdminHash()) navigate(currentRouteId());
+navigate(currentRouteId());

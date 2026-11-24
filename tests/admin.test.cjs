@@ -12,7 +12,7 @@ function loadApp(fields = {}) {
     getPublicUrl: (name) => ({ data: { publicUrl: `https://example.com/product-images/${name}` } }),
   };
   const source = fs.readFileSync(path.join(__dirname, '../web/admin/app.js'), 'utf8')
-    .replace('/* ---------- Boot ---------- */\nrender();\nloadProducts();', '')
+    .replace('/* ---------- Boot ---------- */\nrender();\nsupabase.auth.onAuthStateChange(onAuthStateChange);', '')
     + '\nthis.testing = { validateForm, pathFromUrl, uploadProductImage, setImages: value => { formImages = value; } };';
   const context = {
     window: { supabase: { createClient: () => ({ storage: { from: () => bucket } }) } },
@@ -27,10 +27,11 @@ function loadApp(fields = {}) {
 test('form accepts two or three images and rejects invalid entries', () => {
   const app = loadApp({
     '#f-name': { value: '  Lamp  ' }, '#f-price': { value: '1500' },
-    '#f-desc': { value: 'Desk lamp' }, '#f-active': { checked: true },
+    '#f-desc': { value: 'Desk lamp' }, '#f-active': { checked: true }, '#f-category': { value: 'Home' },
   });
   app.setImages([{}, {}]);
   assert.equal(app.validateForm().name, 'Lamp');
+  assert.equal(app.validateForm().category, 'Home');
   app.setImages([{}]);
   assert.match(app.validateForm().error, /at least 2/);
   app.setImages([{}, {}, {}, {}]);
