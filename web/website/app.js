@@ -19,9 +19,9 @@ const CART_KEY = "bazaar_cart_v1";
 const ORDERS_KEY = "bazaar_orders_v1";
 
 /* ---------- Contact & support constants (editable by the store owner) ---------- */
-const SUPPORT_PHONE_DISPLAY = "0322 1393770";
-const SUPPORT_PHONE_TEL = "+923221393770";
-const SUPPORT_EMAIL = "";                 // optional — paste a support email here to show it
+const SUPPORT_PHONE_DISPLAY = "03221393770";
+const SUPPORT_PHONE_TEL = "03221393770";
+const SUPPORT_EMAIL = "abdulmanan304000@gmail.com";
 const SUPPORT_HOURS = "Sunday – Thursday: 9:00 AM – 5:00 PM"; // editable placeholder
 
 /* ---------- State (cart and orders stay on this device) ---------- */
@@ -334,7 +334,7 @@ function renderShop() {
   if (all.length === 0) {
     grid.append(el("div", { class: "empty-state" },
       el("h3", { text: loadingError ? "Catalog unavailable" : (searchQuery ? "Nothing matches that search" : "No products yet") }),
-      el("p", { text: loadingError || (searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store administrator will appear here.") })
+      el("p", { text: loadingError || (searchQuery || selectedCategory ? "Try a different search or category." : "Products added by the store will appear here.") })
     ));
   } else {
     for (const p of all) grid.append(productCard(p));
@@ -585,7 +585,7 @@ function renderSupport() {
         el("span", { class: "support-fact-value", text: SUPPORT_HOURS })
       )
     ),
-    SUPPORT_EMAIL ? el("p", { class: "support-email", text: `Email: ${SUPPORT_EMAIL}` }) : null,
+    SUPPORT_EMAIL ? el("p", { class: "support-email" }, "Email: ", el("a", { href: `mailto:${SUPPORT_EMAIL}`, text: SUPPORT_EMAIL })) : null,
     el("p", { class: "support-tip", text: "Tip: WhatsApp is the fastest way to reach us. You'll get a quick reply right in the chat." })
   );
   main.append(supportCard);
