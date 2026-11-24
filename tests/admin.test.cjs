@@ -96,14 +96,28 @@ test('mocked, not real: dark default and blocked storage toggle', () => {
 test('mocked, not real: website link is private to signed-in header and opens safely', async () => {
   const html = fs.readFileSync(path.join(__dirname,'../web/admin/index.html'),'utf8');
   assert.match(html, /id="view-website"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*hidden/);
+  assert.match(html, /id="mobile-view-website"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  assert.equal((html.match(/id="sign-out"/g) || []).length, 1);
+  assert.match(html, /<section id="dashboard" hidden>[\s\S]*id="mobile-view-website"/);
   const a=setup(); assert.equal(a.elements['view-website'].hidden,true);
   a.auth('INITIAL_SESSION',{user:{id:'admin',email:'abdulmanan@bazaarshop.app'}});
   assert.equal(a.elements['view-website'].hidden,false);
   assert.equal(a.elements['view-website'].href,'https://bazaar-website-min955379-6910.vercel.app');
+  assert.equal(a.elements['mobile-view-website'].href,a.elements['view-website'].href);
+  assert.equal(a.elements['sign-out'].hidden,false);
   a.auth('SIGNED_OUT',null); assert.equal(a.elements['view-website'].hidden,true);
 });
 
 test('mocked, not real: missing preference defaults dark and light preference is restored', () => {
   const run = saved => { const root = {dataset:{}}; const ctx={document:{documentElement:root,addEventListener(){}},localStorage:{getItem(){return saved}}}; vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../web/admin/theme.js'),'utf8'),ctx); return root.dataset.theme; };
   assert.equal(run(null),'dark'); assert.equal(run('light'),'light');
+});
+
+
+test('mocked, not real: mobile and desktop copies use exclusive CSS visibility', () => {
+  const css=fs.readFileSync(path.join(__dirname,'../web/admin/style.css'),'utf8');
+  assert.match(css,/\.mobile-website,#editor-website\{display:none\}/);
+  assert.match(css,/@media\(max-width:767px\)/);
+  assert.match(css,/\.header-actions \.desktop-website\{display:none\}/);
+  assert.match(css,/\.dash-actions \.mobile-website,#editor-website \.mobile-website\{display:inline-flex\}/);
 });
