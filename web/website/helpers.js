@@ -92,3 +92,14 @@ export function currentProducts(liveProducts, liveCatalogFailed, DEMO_CATALOG) {
   if (liveCatalogFailed) return DEMO_CATALOG;
   return liveProducts;
 }
+
+// The catalog has a boolean stock flag, not an actual quantity. The cart limit
+// below is a per-order cap, never an advertised stock count. Prices are PKR.
+export function productFromSupabase(row) {
+  return {
+    id: row.id, title: row.name, description: row.description || "",
+    category: row.category || "Other", priceCents: Math.round(Number(row.price || 0) * 100),
+    stockCount: row.in_stock === false ? 0 : 50, active: row.in_stock !== false,
+    images: Array.isArray(row.images) ? row.images : [], featured: false,
+  };
+}
