@@ -1,40 +1,28 @@
-/* ===== Bazaar admin portal — Supabase Auth (username + password) + Supabase DB/Storage =====
-   No Google sign-in, no email field, no sign-up, no forgot-password.
-   The username is converted to a hidden email (username + "@bazaarshop.app") for Supabase Auth.
-   The password is typed by the user and sent to Supabase — never stored or hardcoded.
-   Only this one signed-in admin can ADD/EDIT/DELETE products and images (see Row Level Security). */
+/* ===== Bazaar public catalog management (no authentication) ===== */
 
-/* ---------- Config (public only — RLS enforces the real access control) ---------- */
+/* ---------- Config (public credentials; public write policies make editing open to everyone) ---------- */
 const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
-const HIDDEN_EMAIL_DOMAIN = "bazaarshop.app";
 const BUCKET = "product-images";
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;   // safety net: reject huge uploads before compressing
 const MIN_IMAGES = 2;
 const MAX_IMAGES = 3;
 const MAX_PRICE = 10_000_000;
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+});
 
 /* ---------- State ---------- */
-let authUser = null;          // signed-in Supabase user (or null)
-let username = "";            // display username derived from the hidden email
-let adminStatus = "loading";  // loading | signed-out | signed-in
 let products = [];
 let productsReady = false;
 let productsError = null;
 let viewMode = "list";          // list | form
 let editingId = null;          // id when editing (null = add)
 let formImages = [];           // [{ which, url?, file?, oldIndex?, tempUrl? }]
-let removedIndexes = [];       // old indexes of kept images the user removed
+let removedUrls = [];          // URLs of images removed while editing
 let saving = false;
 let formDraft = null;          // { name, pricePKR, desc, active } — survives re-renders
-let failedAttempts = 0;
-let lockedUntil = 0;           // Date.now() timestamp while locked out
-let lockoutTimer = null;
-let signInBusy = false;
-let authError = null;
-let deletePending = null;
 
 /* ---------- Helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -81,45 +69,9 @@ function fmtDate(d) {
   } catch { return "—"; }
 }
 
-function hiddenEmail(u) {
-  return `${String(u || "").trim().toLowerCase()}@${HIDDEN_EMAIL_DOMAIN}`;
-}
-
-function usernameFromEmail(email) {
-  const s = String(email || "");
-  const suffix = `@${HIDDEN_EMAIL_DOMAIN}`;
-  if (s.endsWith(suffix)) return s.slice(0, -suffix.length);
-  return s;
-}
-
 function pathFromUrl(url) {
   const m = String(url || "").match(/\/product-images\/(.+?)(\?.*)?$/);
   return m ? m[1] : null;
-}
-
-function lockoutSecondsLeft() {
-  const left = Math.ceil((lockedUntil - Date.now()) / 1000);
-  return left > 0 ? left : 0;
-}
-
-// Temporary diagnostic: surface the Auth service's actual response without credentials.
-function authDiagnostic(error, password) {
-  const code = String(error?.code || error?.name || "unknown_error");
-  const message = String(error?.message || "No error message returned.");
-  const safe = (value) => password ? value.split(password).join("[redacted]") : value;
-  return `Sign-in failed (${safe(code)}): ${safe(message)}`;
-}
-
-function recordFailedAttempt() {
-  failedAttempts += 1;
-  if (failedAttempts < 5) return;
-  lockedUntil = Date.now() + 30_000;
-  clearTimeout(lockoutTimer);
-  lockoutTimer = setTimeout(() => {
-    lockedUntil = 0;
-    failedAttempts = 0;
-    if (adminStatus === "signed-out") { authError = null; render(); }
-  }, 30_000);
 }
 
 function path(d, extra = {}) {
@@ -138,188 +90,32 @@ function iconUpload() {
   return el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" }, path("M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"));
 }
 
-/* ---------- Auth (username + password → hidden email) ---------- */
-function onAuthStateChange(event, session) {
-  const user = session?.user || null;
-  if (user) {
-    username = usernameFromEmail(user.email);
-    adminStatus = "signed-in";
-    authUser = user;
-    if (authError) authError = null;
-    if (failedAttempts > 0) failedAttempts = 0;
-    render();
-    loadProducts();
-  } else {
-    authUser = null;
-    username = "";
-    adminStatus = "signed-out";
-    products = [];
-    productsReady = false;
-    productsError = null;
-    viewMode = "list";
-    editingId = null;
-    formImages = [];
-    removedIndexes = [];
-    formDraft = null;
-    render();
-  }
-}
-
-supabase.auth.onAuthStateChange(onAuthStateChange);
-
-async function handleSignIn(e) {
-  e?.preventDefault?.();
-  if (signInBusy) return;
-
-  const locked = lockoutSecondsLeft();
-  if (locked > 0) {
-    authError = `Too many failed attempts — try again in ${locked} seconds.`;
-    render();
-    return;
-  }
-
-  const usernameInput = ($("#f-username")?.value || "").trim();
-  const passwordInput = $("#f-password")?.value || "";
-
-  if (!usernameInput || !passwordInput) {
-    authError = "Enter your username and password.";
-    render();
-    return;
-  }
-
-  const email = hiddenEmail(usernameInput);
-  signInBusy = true;
-  authError = null;
-  render();
-
-  try {
-    const { error } = await supabase.auth.signInWithPassword({ email, password: passwordInput });
-    if (error) {
-      recordFailedAttempt();
-      authError = authDiagnostic(error, passwordInput);
-      render();
-      return;
-    }
-    // success — onAuthStateChange will handle the transition
-    failedAttempts = 0;
-    lockedUntil = 0;
-    clearTimeout(lockoutTimer);
-    authError = null;
-  } catch (err) {
-    recordFailedAttempt();
-    authError = authDiagnostic(err, passwordInput);
-    render();
-  } finally {
-    signInBusy = false;
-    render();
-  }
-}
-
-async function handleSignOut() {
-  try { await supabase.auth.signOut(); } catch (e) { console.error(e); }
-}
-
 /* ---------- Data loading ---------- */
 async function loadProducts() {
   productsReady = false;
   productsError = null;
   render();
-  const { data, error } = await supabase
-    .from("products")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) {
+  try {
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    products = (data || []).filter((p) => p && typeof p.name === "string");
+  } catch (error) {
     console.error(error);
     productsError = error.message || "Could not load products.";
+  } finally {
     productsReady = true;
     render();
-    return;
   }
-  products = (data || []).filter((p) => p && typeof p.name === "string");
-  productsReady = true;
-  render();
 }
 
 /* ---------- Rendering ---------- */
 function render() {
-  const nav = $("#nav-tabs");
-  nav.innerHTML = "";
-  if (adminStatus !== "signed-in") {
-    nav.style.display = "none";
-    appMain.innerHTML = "";
-    appMain.append(gateView());
-    return;
-  }
-  nav.style.display = "flex";
-  renderNav();
   appMain.innerHTML = "";
   appMain.append(dashboardView());
-}
-
-function renderNav() {
-  const nav = $("#nav-tabs");
-  const chip = el("div", { class: "user-chip" },
-    el("span", { class: "who" },
-      el("span", { class: "name", text: username || "Admin" }),
-      el("span", { class: "role", text: "Administrator" })
-    ),
-    el("button", { class: "icon-btn", type: "button", title: "Sign out", "aria-label": "Sign out", onclick: handleSignOut }, signOutIcon())
-  );
-  nav.append(chip);
-}
-
-function signOutIcon() {
-  return el("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" },
-    path("M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"),
-    path("M16 17l5-5-5-5"),
-    path("M21 12H9")
-  );
-}
-
-/* ---------- Gate / sign-in ---------- */
-function gateView() {
-  if (adminStatus === "loading") {
-    return el("div", { class: "gate-wrap" }, el("div", { class: "gate-card" }, el("div", { class: "content" }, el("h1", { text: "Loading…" }), el("p", { class: "sub", text: "Checking admin session." }))));
-  }
-  const locked = lockoutSecondsLeft();
-  const passwordField = el("div", { class: "field" },
-    el("label", { text: "Password", for: "f-password" }),
-    el("input", { id: "f-password", type: "password", autocomplete: "current-password", placeholder: "Enter your password", required: "", autocapitalize: "off", autocorrect: "off", spellcheck: "false" })
-  );
-  const usernameField = el("div", { class: "field" },
-    el("label", { text: "Username", for: "f-username" }),
-    el("input", { id: "f-username", type: "text", autocomplete: "username", placeholder: "Username", required: "", autocapitalize: "none", autocorrect: "off", spellcheck: "false" })
-  );
-  const error = authError;
-
-  const signInBtn = el("button", {
-    class: "primary-btn wide", type: "submit", id: "f-sign-in", disabled: signInBusy || locked > 0, onclick: null,
-  },
-    signInBusy ? "Signing in…" : (locked > 0 ? `Locked — try again in ${locked}s` : "Sign in")
-  );
-
-  const form = el("form", { class: "gate-form", onsubmit: handleSignIn },
-    el("p", { class: "sub", style: "margin:0 0 0", text: "Sign in with your username and password to manage the catalog." }),
-    usernameField,
-    passwordField,
-    error ? el("p", { class: "gate-err show", text: error }) : null,
-    signInBtn,
-    el("p", { class: "hint", style: "text-align:center", text: "Only the Bazaar administrator can sign in here." })
-  );
-
-  return el("div", { class: "gate-wrap" },
-    el("div", { class: "gate-card" },
-      el("div", { class: "hero-top" },
-        el("img", { src: "assets/img_hero_banner.jpg", alt: "" }),
-        el("div", { class: "scrim" }),
-        el("span", { class: "pill", text: "Admin access" })
-      ),
-      el("div", { class: "content" },
-        el("h1", { text: "Sign in to manage Bazaar" }),
-        form
-      )
-    )
-  );
+  if (viewMode === "form") renderImagesGrid();
 }
 
 /* ---------- Dashboard ---------- */
@@ -332,13 +128,6 @@ function kpiStrip(productsCount, inStockCount, hiddenCount) {
   );
 }
 
-function signedInChip() {
-  return el("div", { class: "signed-in-chip" },
-    el("span", { class: "signed-in-email", text: username || "Administrator" }),
-    el("button", { class: "secondary-btn", type: "button", onclick: handleSignOut, text: "Sign out" })
-  );
-}
-
 function dashboardView() {
   const inStock = products.filter((p) => p.in_stock !== false).length;
   const hidden = products.filter((p) => p.in_stock === false).length;
@@ -346,9 +135,8 @@ function dashboardView() {
   const head = el("div", { class: "dash-head" },
     el("div", {},
       el("h1", { text: "Admin panel" }),
-      el("p", { text: "Manage the catalog — changes appear on the storefront automatically." })
-    ),
-    signedInChip()
+      el("p", { text: "Manage the catalog. This page and its editing controls are public." })
+    )
   );
 
   const content = el("div", {});
@@ -387,7 +175,7 @@ function productsTab() {
   if (products.length === 0) {
     wrap.append(el("div", { class: "empty" },
       el("h3", { text: "No products yet" }),
-      el("p", { text: "Products added here appear on the live storefront automatically. Use “Add product” to create the first one." })
+      el("p", { text: "Use “Add product” to create the first one." })
     ));
     return wrap;
   }
@@ -421,11 +209,11 @@ function productRow(p) {
 function openForm(id) {
   editingId = id;
   viewMode = "form";
-  removedIndexes = [];
+  removedUrls = [];
   if (id) {
     const p = products.find((x) => x.id === id);
     const kept = Array.isArray(p && p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
-    formImages = kept.map((url, i) => ({ which: "kept", url, oldIndex: i }));
+    formImages = kept.map((url) => ({ which: "kept", url }));
   } else {
     formImages = [];
   }
@@ -441,7 +229,7 @@ function closeForm() {
     if (img.which === "new" && img.tempUrl) URL.revokeObjectURL(img.tempUrl);
   }
   formImages = [];
-  removedIndexes = [];
+  removedUrls = [];
   saving = false;
   render();
 }
@@ -536,7 +324,7 @@ function onImagesPicked(e) {
 
 function removeImageAt(index) {
   const img = formImages[index];
-  if (img && img.which === "kept") removedIndexes.push(img.oldIndex);
+  if (img && img.which === "kept") removedUrls.push(img.url);
   if (img && img.which === "new" && img.tempUrl) URL.revokeObjectURL(img.tempUrl);
   formImages.splice(index, 1);
   renderImagesGrid();
@@ -556,12 +344,12 @@ async function compressImage(file, maxDim = 1200, quality = 0.78) {
   );
 }
 
-async function uploadProductImage(productId, index, blob) {
-  const imgPath = `products/${productId}/image-${index}.jpg`;
+async function uploadProductImage(productId, blob) {
+  const imgPath = `products/${productId}/${crypto.randomUUID()}.jpg`;
   const { error } = await supabase.storage.from(BUCKET).upload(imgPath, blob, { contentType: "image/jpeg", upsert: true });
   if (error) throw new Error("Image upload failed: " + (error.message || "unknown error"));
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(imgPath);
-  return data.publicUrl;
+  return { url: data.publicUrl, path: imgPath };
 }
 
 function validateForm() {
@@ -582,34 +370,28 @@ async function submitProductForm() {
   const v = validateForm();
   if (v.error) { toast(v.error, true); return; }
   const { name, pricePKR, desc, active } = v;
-  const isEdit = !!editingId;
 
   formDraft = { name, pricePKR, desc, active };
   saving = true;
   const saveBtn = $("#f-save");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
 
+  const uploadedPaths = [];
+  let saved = false;
   try {
     const productId = editingId || crypto.randomUUID();
 
-    // upload only the new images; kept images keep their existing URLs
-    const kept = formImages.filter((i) => i.which === "kept");
-    const occupied = new Set(kept.map((i) => i.oldIndex));
-    const uploadedNew = new Set();   // slot indices newly uploaded (not deleted later)
-    let newIndex = 0;
+    // Unique names avoid overwriting existing images before the product save succeeds.
     const imageUrls = [];
     for (const img of formImages) {
       if (img.which === "kept") {
         imageUrls.push(img.url);
         continue;
       }
-      while (occupied.has(newIndex)) newIndex++;
       const blob = await compressImage(img.file);
-      const url = await uploadProductImage(productId, newIndex, blob);
-      occupied.add(newIndex);
-      uploadedNew.add(newIndex);
-      imageUrls.push(url);
-      newIndex++;
+      const uploaded = await uploadProductImage(productId, blob);
+      uploadedPaths.push(uploaded.path);
+      imageUrls.push(uploaded.url);
     }
 
     const row = {
@@ -621,26 +403,29 @@ async function submitProductForm() {
     };
 
     if (editingId) {
-      const { error } = await supabase.from("products").update(row).eq("id", editingId);
+      const { data, error } = await supabase.from("products").update(row).eq("id", editingId).select("id").maybeSingle();
       if (error) throw new Error(error.message || "Failed to update the product.");
-      toast(`“${products.find((x) => x.id === editingId)?.name || name}” updated.`);
-      // best-effort delete of removed old images (skip any path taken by a fresh upload)
-      for (const i of removedIndexes) {
-        if (uploadedNew.has(i)) continue;
-        try {
-          const imgPath = `products/${productId}/image-${i}.jpg`;
-          await supabase.storage.from(BUCKET).remove([imgPath]);
-        } catch {}
+      if (!data) throw new Error("Product could not be updated. Check access permissions.");
+      saved = true;
+      toast(`“${name}” updated.`);
+      const oldPaths = removedUrls.map(pathFromUrl).filter(Boolean);
+      if (oldPaths.length) {
+        const { error: cleanupError } = await supabase.storage.from(BUCKET).remove(oldPaths);
+        if (cleanupError) console.warn("Could not remove old images", cleanupError);
       }
     } else {
       const { error } = await supabase.from("products").insert({ id: productId, ...row });
       if (error) throw new Error(error.message || "Failed to add the product.");
-      toast(`“${name}” added — it appears on the storefront now.`);
+      saved = true;
+      toast(`“${name}” added.`);
     }
 
     closeForm();
     await loadProducts();
   } catch (e) {
+    if (!saved && uploadedPaths.length) {
+      try { await supabase.storage.from(BUCKET).remove(uploadedPaths); } catch (cleanupError) { console.warn(cleanupError); }
+    }
     console.error(e);
     saving = false;
     const msg = e?.message || "Save failed. Please try again.";
@@ -654,8 +439,9 @@ async function handleDelete(p) {
   if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return;
   const images = Array.isArray(p.images) ? p.images.filter((s) => /^https?:\/\//i.test(String(s || ""))) : [];
   try {
-    const { error } = await supabase.from("products").delete().eq("id", p.id);
+    const { data, error } = await supabase.from("products").delete().eq("id", p.id).select("id").maybeSingle();
     if (error) throw new Error(error.message || "Delete failed.");
+    if (!data) throw new Error("Product could not be deleted. Check access permissions.");
     toast(`“${p.name}” deleted.`);
     closeForm();
     // best-effort delete of the product's images
@@ -674,3 +460,4 @@ async function handleDelete(p) {
 
 /* ---------- Boot ---------- */
 render();
+loadProducts();
