@@ -8,7 +8,7 @@ const lock = createLockout();
 const MAX_SIZE = 4 * 1024 * 1024;
 const ADMIN = 'abdulmanan@bazaarshop.app';
 let activeUser = null, initialized = false, signingIn = false, busy = false;
-let products = [], editing = null, photos = [], originalImages = [];
+let products = [], editing = null, photos = [], originalImages = [], draftId = null;
 let timer;
 
 function errorText(error) { return String(error?.message || error || 'Unknown error'); }
@@ -28,7 +28,8 @@ function clearPhotos() {
   photos = []; originalImages = [];
 }
 function signedOut() {
-  activeUser = null; products = []; editing = null; clearPhotos();
+  activeUser = null; products = []; editing = null; draftId = null; clearPhotos();
+  $('list-view').hidden = false; for (const id of ['total-count', 'stock-count', 'out-count']) $(id).textContent = '–'; $('product-list').replaceChildren();
   $('dashboard').hidden = true; $('sign-out').hidden = true; $('product-form').hidden = true; $('login').hidden = false;
   $('password').value = '';
 }
@@ -72,14 +73,16 @@ $('sign-out').addEventListener('click', async () => {
   finally { button.disabled = false; }
 });
 async function loadProducts() {
-  $('list-message').textContent = 'Loading products…';
+  $('list-message').textContent = 'Loading products…'; $('retry').hidden = true;
+  for (const id of ['total-count', 'stock-count', 'out-count']) $(id).textContent = '–'; $('product-list').replaceChildren();
   try {
     const { data, error } = await withTimeout(client.from('products').select('id,name,price,description,images,in_stock,created_at').order('created_at', { ascending: false }), 'Loading');
     if (error) throw error;
     products = data || []; showProducts();
-    $('list-message').textContent = products.length ? '' : 'No products yet.';
-  } catch (error) { $('list-message').textContent = `Could not load products: ${errorText(error)}`; }
+    $('list-message').textContent = products.length ? '' : 'No products yet. Tap Add product.';
+  } catch (error) { $('list-message').textContent = `Could not load products: ${errorText(error)}`; $('retry').hidden = false; }
 }
+$('retry').onclick = () => loadProducts();
 function node(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
 function showProducts() {
   $('total-count').textContent = products.length;
@@ -99,15 +102,15 @@ function showProducts() {
 function openForm(product = null) {
   if (busy) return;
   if (!$('product-form').hidden && !confirm('Discard the current draft?')) return;
-  clearPhotos(); editing = product;
+  clearPhotos(); editing = product; draftId = product ? null : crypto.randomUUID();
   $('product-form').reset(); $('form-title').textContent = product ? 'Edit product' : 'Add product';
   $('name').value = product?.name || ''; $('price').value = product?.price ?? ''; $('description').value = product?.description || '';
   $('in-stock').checked = product ? product.in_stock !== false : true;
   originalImages = [...(product?.images || [])]; photos = originalImages.map(url => ({ url, preview: url }));
-  $('form-error').textContent = ''; $('product-form').hidden = false; showPhotos(); $('name').focus();
+  $('form-error').textContent = ''; $('list-view').hidden = true; $('product-form').hidden = false; showPhotos(); $('name').focus();
 }
 $('add').onclick = () => openForm();
-$('cancel').onclick = () => { if (busy) return; if (confirm('Discard this draft?')) { clearPhotos(); $('product-form').hidden = true; } };
+$('cancel').onclick = () => { if (busy) return; if (confirm('Discard this draft?')) { clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; } };
 $('photos').addEventListener('change', event => {
   const files = [...event.target.files]; event.target.value = '';
   if (photos.length + files.length > 3) { $('form-error').textContent = 'Choose no more than 3 photos.'; return; }
@@ -175,11 +178,19 @@ $('product-form').addEventListener('submit', async event => {
       photo.url = data.publicUrl; uploaded.push(data.publicUrl); urls.push(data.publicUrl);
     }
     const payload = { name, price, description, images: urls, in_stock: $('in-stock').checked };
-    const operation = editing ? client.from('products').update(payload).eq('id', editing.id).select('id').single() : client.from('products').insert(payload).select('id').single();
-    const { error } = await withTimeout(operation, 'Saving'); if (error) throw error; saved = true;
+    const operation = editing ? client.from('products').update(payload).eq('id', editing.id).select('id').single() : client.from('products').insert({ id: draftId, ...payload }).select('id').single();
+    const { error } = await withTimeout(operation, 'Saving');
+    if (error) {
+      // A timed-out insert may already have completed. Only accept a duplicate
+      // if this specific draft ID exists; other uniqueness errors remain errors.
+      if (editing || error.code !== '23505') throw error;
+      const existing = await withTimeout(client.from('products').select('id').eq('id', draftId).maybeSingle(), 'Checking saved product');
+      if (existing.error || !existing.data) throw error;
+    }
+    saved = true;
     let cleanupError = '';
     try { await removeUnused(originalImages.filter(url => !urls.includes(url))); } catch (err) { cleanupError = ` Product saved, but old photos could not be removed: ${errorText(err)}`; }
-    clearPhotos(); $('product-form').hidden = true; await loadProducts(); if (cleanupError) $('list-message').textContent = cleanupError;
+    clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; await loadProducts(); if (cleanupError) $('list-message').textContent = cleanupError;
   } catch (error) {
     // Do not delete uploaded files: after a timeout the database may have saved them.
     $('form-error').textContent = `Save failed: ${errorText(error)}${uploaded.length && !saved ? ' Uploaded files may remain; check the catalog before retrying.' : ''}`;
