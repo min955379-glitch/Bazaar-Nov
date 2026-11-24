@@ -1,9 +1,10 @@
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import { WEBSITE_URL, SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 import { usernameEmail, signInError, createLockout } from './auth-utils.js';
 
 const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const bucket = client.storage.from('product-images');
 const $ = id => document.getElementById(id);
+$('view-website').href = WEBSITE_URL;
 const lock = createLockout();
 const MAX_SIZE = 4 * 1024 * 1024;
 const ADMIN = 'abdulmanan@bazaarshop.app';
@@ -30,7 +31,7 @@ function clearPhotos() {
 function signedOut() {
   activeUser = null; products = []; editing = null; draftId = null; clearPhotos();
   $('list-view').hidden = false; for (const id of ['total-count', 'stock-count', 'out-count']) $(id).textContent = '–'; $('product-list').replaceChildren();
-  $('dashboard').hidden = true; $('sign-out').hidden = true; $('product-form').hidden = true; $('login').hidden = false;
+  $('dashboard').hidden = true; $('sign-out').hidden = true; $('view-website').hidden = true; $('save-success').hidden = true; $('product-form').hidden = true; $('login').hidden = false;
   $('password').value = '';
 }
 function authChanged(event, session) {
@@ -45,7 +46,7 @@ function authChanged(event, session) {
     loginButton(); return;
   }
   if (activeUser?.id === user.id) { loginButton(); return; }
-  activeUser = user; $('login').hidden = true; $('dashboard').hidden = false; $('sign-out').hidden = false; $('login-error').textContent = '';
+  activeUser = user; $('login').hidden = true; $('dashboard').hidden = false; $('sign-out').hidden = false; $('view-website').hidden = false; $('login-error').textContent = '';
   setTimeout(loadProducts, 0);
 }
 $('login-form').addEventListener('submit', async event => {
@@ -102,6 +103,7 @@ function showProducts() {
 function openForm(product = null) {
   if (busy) return;
   if (!$('product-form').hidden && !confirm('Discard the current draft?')) return;
+  $('save-success').hidden = true;
   clearPhotos(); editing = product; draftId = product ? null : crypto.randomUUID();
   $('product-form').reset(); $('form-title').textContent = product ? 'Edit product' : 'Add product';
   $('name').value = product?.name || ''; $('price').value = product?.price ?? ''; $('description').value = product?.description || '';
@@ -180,17 +182,24 @@ $('product-form').addEventListener('submit', async event => {
     const payload = { name, price, description, images: urls, in_stock: $('in-stock').checked };
     const operation = editing ? client.from('products').update(payload).eq('id', editing.id).select('id').single() : client.from('products').insert({ id: draftId, ...payload }).select('id').single();
     const { error } = await withTimeout(operation, 'Saving');
+    let alreadySaved = false;
     if (error) {
       // A timed-out insert may already have completed. Only accept a duplicate
       // if this specific draft ID exists; other uniqueness errors remain errors.
       if (editing || error.code !== '23505') throw error;
       const existing = await withTimeout(client.from('products').select('id').eq('id', draftId).maybeSingle(), 'Checking saved product');
       if (existing.error || !existing.data) throw error;
+      alreadySaved = true;
     }
     saved = true;
     let cleanupError = '';
     try { await removeUnused(originalImages.filter(url => !urls.includes(url))); } catch (err) { cleanupError = ` Product saved, but old photos could not be removed: ${errorText(err)}`; }
-    clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; await loadProducts(); if (cleanupError) $('list-message').textContent = cleanupError;
+    clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; await loadProducts();
+    const success = $('save-success'); const link = node('a', 'View website', 'success-link');
+    link.href = WEBSITE_URL; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    success.replaceChildren(); success.textContent = alreadySaved ? 'Product was already saved. ' : 'Product saved. ';
+    success.append(link); success.hidden = false;
+    if (cleanupError) $('list-message').textContent = cleanupError;
   } catch (error) {
     // Do not delete uploaded files: after a timeout the database may have saved them.
     $('form-error').textContent = `Save failed: ${errorText(error)}${uploaded.length && !saved ? ' Uploaded files may remain; check the catalog before retrying.' : ''}`;

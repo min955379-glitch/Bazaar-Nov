@@ -8,7 +8,7 @@ const path = require('node:path');
 function setup() {
   const elements = {};
   function element(id = '') {
-    return { id, hidden: ['dashboard', 'product-form', 'sign-out'].includes(id), value: '', checked: true, disabled: false, textContent: '', children: [], handlers: {},
+    return { id, hidden: ['dashboard', 'product-form', 'sign-out', 'view-website', 'save-success'].includes(id), value: '', checked: true, disabled: false, textContent: '', children: [], handlers: {},
       addEventListener(event, fn) { this.handlers[event] = fn; }, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
       focus() { document.activeElement = this; }, reset() {}, classList: { add() {}, remove() {} } };
   }
@@ -19,7 +19,7 @@ function setup() {
     from() { return query; }, storage: { from() { return {}; } } };
   const source = fs.readFileSync(path.join(__dirname, '../web/admin/app.js'), 'utf8').replace(/^import .*;\n/gm, '');
   let now = 0, failures = 0, until = 0;
-  const context = { document, window: { supabase: { createClient: () => client } }, SUPABASE_URL: 'https://example.com', SUPABASE_ANON_KEY: 'public',
+  const context = { document, window: { supabase: { createClient: () => client } }, SUPABASE_URL: 'https://example.com', SUPABASE_ANON_KEY: 'public', WEBSITE_URL: 'https://bazaar-website-min955379-6910.vercel.app',
     usernameEmail: x => x.trim().toLowerCase() + '@bazaarshop.app', signInError: e => e.message === 'Invalid login credentials' ? 'Wrong username or password' : e.message,
     createLockout: () => ({ remaining: () => Math.max(0, Math.ceil((until - now) / 1000)), fail: () => { if (++failures === 5) { until = now + 30000; failures = 0; } }, reset: () => { failures = 0; until = 0; } }),
     console, setTimeout, clearTimeout, setInterval, clearInterval, confirm: () => true, URL, crypto: { randomUUID: () => 'test' }, Image: function () {} };
@@ -64,6 +64,9 @@ test('mocked, not real: retry uses same product id and handles saved duplicate',
   assert.deepEqual(ids, ['test', 'test']);
   assert.equal(a.elements['product-form'].hidden, true);
   assert.equal(a.elements['list-view'].hidden, false);
+  const link = a.elements['save-success'].children[0];
+  assert.equal(link.href, 'https://bazaar-website-min955379-6910.vercel.app');
+  assert.equal(link.target, '_blank'); assert.equal(link.rel, 'noopener noreferrer');
 });
 
 test('mocked, not real: theme loads saved choice and toggle saves', () => {
@@ -81,4 +84,26 @@ test('mocked, not real: load failure keeps counters unknown and retry loads empt
   a.auth('INITIAL_SESSION', { user: { id:'admin', email:'abdulmanan@bazaarshop.app' } }); await flush();
   assert.equal(a.elements['total-count'].textContent, '–'); assert.match(a.elements['list-message'].textContent, /offline/); assert.equal(a.elements.retry.hidden, false);
   await a.elements.retry.onclick(); assert.equal(a.elements['total-count'].textContent, 0); assert.equal(a.elements['list-message'].textContent, 'No products yet. Tap Add product.');
+});
+
+test('mocked, not real: dark default and blocked storage toggle', () => {
+  let ready, click; const root = {dataset:{}}, button = {setAttribute(){}, addEventListener(_,fn){click=fn;}};
+  const ctx = {document:{documentElement:root,addEventListener(_,fn){ready=fn;},getElementById(){return button;}}, localStorage:{getItem(){throw Error('blocked')},setItem(){throw Error('blocked')}}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/admin/theme.js'),'utf8'),ctx);
+  assert.equal(root.dataset.theme,'dark'); ready(); click(); assert.equal(root.dataset.theme,'light'); click(); assert.equal(root.dataset.theme,'dark');
+});
+
+test('mocked, not real: website link is private to signed-in header and opens safely', async () => {
+  const html = fs.readFileSync(path.join(__dirname,'../web/admin/index.html'),'utf8');
+  assert.match(html, /id="view-website"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*hidden/);
+  const a=setup(); assert.equal(a.elements['view-website'].hidden,true);
+  a.auth('INITIAL_SESSION',{user:{id:'admin',email:'abdulmanan@bazaarshop.app'}});
+  assert.equal(a.elements['view-website'].hidden,false);
+  assert.equal(a.elements['view-website'].href,'https://bazaar-website-min955379-6910.vercel.app');
+  a.auth('SIGNED_OUT',null); assert.equal(a.elements['view-website'].hidden,true);
+});
+
+test('mocked, not real: missing preference defaults dark and light preference is restored', () => {
+  const run = saved => { const root = {dataset:{}}; const ctx={document:{documentElement:root,addEventListener(){}},localStorage:{getItem(){return saved}}}; vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../web/admin/theme.js'),'utf8'),ctx); return root.dataset.theme; };
+  assert.equal(run(null),'dark'); assert.equal(run('light'),'light');
 });
