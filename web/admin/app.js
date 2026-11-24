@@ -1,13 +1,13 @@
 /* ===== Bazaar admin portal — Supabase Auth (username + password) + Supabase DB/Storage =====
    No Google sign-in, no email field, no sign-up, no forgot-password.
-   The username is converted to a hidden email (username + "@bazaar.local") for Supabase Auth.
+   The username is converted to a hidden email (username + "@bazaarshop.app") for Supabase Auth.
    The password is typed by the user and sent to Supabase — never stored or hardcoded.
    Only this one signed-in admin can ADD/EDIT/DELETE products and images (see Row Level Security). */
 
 /* ---------- Config (public only — RLS enforces the real access control) ---------- */
 const SUPABASE_URL = "https://spetcfhneurdkipsmphx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZXRjZmhuZXVyZGtpcHNtcGh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0NDgyOTUsImV4cCI6MjExMTAyNDI5NX0.RkniJOSufaYsqTkUZDLIkjqPUPIQ5JQPtbkpVY2dZTE";
-const HIDDEN_EMAIL_DOMAIN = "bazaar.local";
+const HIDDEN_EMAIL_DOMAIN = "bazaarshop.app";
 const BUCKET = "product-images";
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;   // safety net: reject huge uploads before compressing
 const MIN_IMAGES = 2;
@@ -31,6 +31,7 @@ let saving = false;
 let formDraft = null;          // { name, pricePKR, desc, active } — survives re-renders
 let failedAttempts = 0;
 let lockedUntil = 0;           // Date.now() timestamp while locked out
+let lockoutTimer = null;
 let signInBusy = false;
 let authError = null;
 let deletePending = null;
@@ -99,6 +100,26 @@ function pathFromUrl(url) {
 function lockoutSecondsLeft() {
   const left = Math.ceil((lockedUntil - Date.now()) / 1000);
   return left > 0 ? left : 0;
+}
+
+// Temporary diagnostic: surface the Auth service's actual response without credentials.
+function authDiagnostic(error, password) {
+  const code = String(error?.code || error?.name || "unknown_error");
+  const message = String(error?.message || "No error message returned.");
+  const safe = (value) => password ? value.split(password).join("[redacted]") : value;
+  return `Sign-in failed (${safe(code)}): ${safe(message)}`;
+}
+
+function recordFailedAttempt() {
+  failedAttempts += 1;
+  if (failedAttempts < 5) return;
+  lockedUntil = Date.now() + 30_000;
+  clearTimeout(lockoutTimer);
+  lockoutTimer = setTimeout(() => {
+    lockedUntil = 0;
+    failedAttempts = 0;
+    if (adminStatus === "signed-out") { authError = null; render(); }
+  }, 30_000);
 }
 
 function path(d, extra = {}) {
@@ -174,43 +195,24 @@ async function handleSignIn(e) {
   try {
     const { error } = await supabase.auth.signInWithPassword({ email, password: passwordInput });
     if (error) {
-      failedAttempts += 1;
-      if (failedAttempts >= 5) lockedUntil = Date.now() + 30_000;
-      const msg = String(error.message || "").toLowerCase();
-      if (msg.includes("rate") || msg.includes("too many") || msg.includes("limit")) {
-        authError = "Too many failed attempts — please wait and try again.";
-      } else if (msg.includes("network") || msg.includes("fetch") || msg.includes("failed to fetch") || msg.includes("connection")) {
-        authError = "Could not reach the sign-in service — check the internet connection.";
-      } else {
-        // deliberately do NOT show the real Supabase error to avoid leaking account state
-        authError = "Wrong username or password";
-      }
+      recordFailedAttempt();
+      authError = authDiagnostic(error, passwordInput);
       render();
       return;
     }
     // success — onAuthStateChange will handle the transition
     failedAttempts = 0;
     lockedUntil = 0;
+    clearTimeout(lockoutTimer);
     authError = null;
   } catch (err) {
-    console.error(err);
-    failedAttempts += 1;
-    if (msgFailedToFetch(err)) {
-      authError = "Could not reach the sign-in service — check the internet connection.";
-    } else {
-      authError = "Wrong username or password";
-    }
-    if (failedAttempts >= 5) lockedUntil = Date.now() + 30_000;
+    recordFailedAttempt();
+    authError = authDiagnostic(err, passwordInput);
     render();
   } finally {
     signInBusy = false;
     render();
   }
-}
-
-function msgFailedToFetch(err) {
-  const m = String(err?.message || err || "").toLowerCase();
-  return m.includes("fetch") || m.includes("network") || m.includes("connection");
 }
 
 async function handleSignOut() {
