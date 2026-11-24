@@ -24,7 +24,7 @@ function setup() {
     createLockout: () => ({ remaining: () => Math.max(0, Math.ceil((until - now) / 1000)), fail: () => { if (++failures === 5) { until = now + 30000; failures = 0; } }, reset: () => { failures = 0; until = 0; } }),
     console, setTimeout, clearTimeout, setInterval, clearInterval, confirm: () => true, URL, crypto: { randomUUID: () => 'test' }, Image: function () {} };
   vm.runInNewContext(source, context);
-  return { elements, document, auth: (...args) => authHandler(...args), setError: err => authError = err, advance(ms) { now += ms; } };
+  return { elements, document, context, client, auth: (...args) => authHandler(...args), setError: err => authError = err, advance(ms) { now += ms; } };
 }
 const flush = () => new Promise(resolve => setTimeout(resolve, 5));
 test('mocked, not real: invalid password preserves username and focuses password', async () => {
@@ -42,4 +42,43 @@ test('mocked, not real: validation keeps draft open when too few images', async 
   const a = setup(); a.auth('INITIAL_SESSION', { user: { id: 'admin', email: 'abdulmanan@bazaarshop.app' } }); await flush(); a.elements.add.onclick();
   a.elements.name.value = 'Draft product'; await a.elements['product-form'].handlers.submit({ preventDefault() {} });
   assert.equal(a.elements['product-form'].hidden, false); assert.match(a.elements['form-error'].textContent, /2 or 3/); assert.equal(a.elements.name.value, 'Draft product');
+});
+
+test('mocked, not real: retry uses same product id and handles saved duplicate', async () => {
+  const a = setup(); const ids = []; let attempt = 0;
+  a.auth('INITIAL_SESSION', { user: { id: 'admin', email: 'abdulmanan@bazaarshop.app' } }); await flush();
+  a.elements.add.onclick();
+  assert.equal(a.elements['list-view'].hidden, true);
+  a.elements.name.value = 'Example'; a.elements.price.value = '300'; a.elements.description.value = 'Example description';
+  vm.runInNewContext("photos = [{url:'https://example.com/1',preview:'https://example.com/1'},{url:'https://example.com/2',preview:'https://example.com/2'}]", a.context);
+  a.client.from = () => ({
+    insert(payload) { ids.push(payload.id); return this; },
+    select() { return this; }, eq() { return this; },
+    single() { return Promise.resolve(++attempt === 1 ? { error: { message: 'connection lost' } } : { error: { code: '23505' } }); },
+    maybeSingle() { return Promise.resolve({data:{id:'test'},error:null}); },
+    order() { return Promise.resolve({data:[],error:null}); },
+  });
+  await a.elements['product-form'].handlers.submit({ preventDefault() {} });
+  assert.equal(a.elements['product-form'].hidden, false);
+  await a.elements['product-form'].handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ids, ['test', 'test']);
+  assert.equal(a.elements['product-form'].hidden, true);
+  assert.equal(a.elements['list-view'].hidden, false);
+});
+
+test('mocked, not real: theme loads saved choice and toggle saves', () => {
+  let callback, click, stored = 'dark';
+  const root = { dataset: {} }, button = { textContent:'', setAttribute() {}, addEventListener(_, fn) { click = fn; } };
+  const ctx = { document: { documentElement: root, addEventListener(_, fn) { callback = fn; }, getElementById() { return button; } },
+    localStorage: { getItem() { return stored; }, setItem(_, value) { stored = value; } }, matchMedia: () => ({matches:false,addEventListener(){}}) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/admin/theme.js'),'utf8'), ctx);
+  assert.equal(root.dataset.theme, 'dark'); callback(); click(); assert.equal(root.dataset.theme, 'light'); assert.equal(stored, 'light');
+});
+
+test('mocked, not real: load failure keeps counters unknown and retry loads empty list', async () => {
+  const a = setup(); let calls = 0;
+  a.client.from = () => ({ select() { return this; }, order() { return Promise.resolve(++calls === 1 ? {error:{message:'offline'}} : {data:[],error:null}); } });
+  a.auth('INITIAL_SESSION', { user: { id:'admin', email:'abdulmanan@bazaarshop.app' } }); await flush();
+  assert.equal(a.elements['total-count'].textContent, '–'); assert.match(a.elements['list-message'].textContent, /offline/); assert.equal(a.elements.retry.hidden, false);
+  await a.elements.retry.onclick(); assert.equal(a.elements['total-count'].textContent, 0); assert.equal(a.elements['list-message'].textContent, 'No products yet. Tap Add product.');
 });
