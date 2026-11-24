@@ -169,7 +169,10 @@ $('product-form').addEventListener('submit', async event => {
       const blob = await compress(photo.file); const path = `${crypto.randomUUID()}.jpg`;
       const { error } = await withTimeout(bucket.upload(path, blob, { contentType: 'image/jpeg', upsert: false }), 'Upload');
       if (error) throw error;
-      const { data } = bucket.getPublicUrl(path); uploaded.push(data.publicUrl); urls.push(data.publicUrl);
+      const { data } = bucket.getPublicUrl(path);
+      // Keep successful uploads attached to the draft so retrying a failed save
+      // does not upload a second copy of the same photo.
+      photo.url = data.publicUrl; uploaded.push(data.publicUrl); urls.push(data.publicUrl);
     }
     const payload = { name, price, description, images: urls, in_stock: $('in-stock').checked };
     const operation = editing ? client.from('products').update(payload).eq('id', editing.id).select('id').single() : client.from('products').insert(payload).select('id').single();
