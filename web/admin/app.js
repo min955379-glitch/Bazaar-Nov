@@ -5,6 +5,7 @@ const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const bucket = client.storage.from('product-images');
 const $ = id => document.getElementById(id);
 $('view-website').href = WEBSITE_URL;
+$('mobile-view-website').href = WEBSITE_URL;
 const lock = createLockout();
 const MAX_SIZE = 4 * 1024 * 1024;
 const ADMIN = 'abdulmanan@bazaarshop.app';
@@ -31,6 +32,7 @@ function clearPhotos() {
 function signedOut() {
   activeUser = null; products = []; editing = null; draftId = null; clearPhotos();
   $('list-view').hidden = false; for (const id of ['total-count', 'stock-count', 'out-count']) $(id).textContent = '–'; $('product-list').replaceChildren();
+  $('dash-actions').append($('mobile-view-website'));
   $('dashboard').hidden = true; $('sign-out').hidden = true; $('view-website').hidden = true; $('save-success').hidden = true; $('product-form').hidden = true; $('login').hidden = false;
   $('password').value = '';
 }
@@ -104,6 +106,7 @@ function openForm(product = null) {
   if (busy) return;
   if (!$('product-form').hidden && !confirm('Discard the current draft?')) return;
   $('save-success').hidden = true;
+  $('editor-website').append($('mobile-view-website'));
   clearPhotos(); editing = product; draftId = product ? null : crypto.randomUUID();
   $('product-form').reset(); $('form-title').textContent = product ? 'Edit product' : 'Add product';
   $('name').value = product?.name || ''; $('price').value = product?.price ?? ''; $('description').value = product?.description || '';
@@ -112,7 +115,7 @@ function openForm(product = null) {
   $('form-error').textContent = ''; $('list-view').hidden = true; $('product-form').hidden = false; showPhotos(); $('name').focus();
 }
 $('add').onclick = () => openForm();
-$('cancel').onclick = () => { if (busy) return; if (confirm('Discard this draft?')) { clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; } };
+$('cancel').onclick = () => { if (busy) return; if (confirm('Discard this draft?')) { clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; $('dash-actions').append($('mobile-view-website')); } };
 $('photos').addEventListener('change', event => {
   const files = [...event.target.files]; event.target.value = '';
   if (photos.length + files.length > 3) { $('form-error').textContent = 'Choose no more than 3 photos.'; return; }
@@ -194,7 +197,7 @@ $('product-form').addEventListener('submit', async event => {
     saved = true;
     let cleanupError = '';
     try { await removeUnused(originalImages.filter(url => !urls.includes(url))); } catch (err) { cleanupError = ` Product saved, but old photos could not be removed: ${errorText(err)}`; }
-    clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; await loadProducts();
+    clearPhotos(); draftId = null; $('product-form').hidden = true; $('list-view').hidden = false; $('dash-actions').append($('mobile-view-website')); await loadProducts();
     const success = $('save-success'); const link = node('a', 'View website', 'success-link');
     link.href = WEBSITE_URL; link.target = '_blank'; link.rel = 'noopener noreferrer';
     success.replaceChildren(); success.textContent = alreadySaved ? 'Product was already saved. ' : 'Product saved. ';
